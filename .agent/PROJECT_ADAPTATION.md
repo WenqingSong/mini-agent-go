@@ -18,17 +18,14 @@ Only remove this file after ADOPTION READY.
 - Project: mini-agent-go
 - Repository: https://cnb.cool/framework-station/mini-agent-go
 - Date: 2026-10-18
-- Current Branch: adoption/agent-workflow-v4.2.1
+- Current Branch: adoption/agent-workflow-v4.2.1（已由 Owner 授权合入 main）
 - Workflow Version: 4.2.1（上游 commit 1fc5c6dc88fc7f417374e37e7354a3a6c4e07a65）
 
 Adoption Status:
 
-- DISCOVER
-- WAITING_FOR_OWNER_DECISION
-- MATERIALIZING
-- VERIFYING
 - READY
-- BLOCKED
+
+（2026-10-18 Owner 指令“合并到 main 并且发布”：D1/D2/D4 已解决，框架、配置、基线、资源与四流程入口检查通过。D3 属首个 Task 前置，不改变接入结论。）
 
 > 这些状态只属于 Adoption 临时工作区。不要把它们加入正常 Workflow V2 state schema。
 
@@ -109,8 +106,8 @@ Validation Commands:
 - Detected Evidence: `git branch -a` 仅有 main 与 origin/main；origin/HEAD → origin/main；两 ref 同 SHA 993f874e6910a9f6efc92512baf477e5d887d921
 - Options: main / 其他待建分支
 - Recommendation: main（唯一既有约定）
-- Owner Decision: 未决（本次按唯一明确证据 materialize 为 main，可审阅时否决）
-- Status: PENDING_OWNER
+- Owner Decision: 已确认 main（2026-10-18 Owner 明确授权合并到 main 并发布）
+- Status: RESOLVED
 
 ### D2 适配分支集成授权
 
@@ -119,8 +116,8 @@ Validation Commands:
 - Detected Evidence: 适配提交仅新增 `.agent/`，未改 `.cnb.yml` 等既有文件
 - Options: 批准合并 / 要求修改后合并 / 暂不合并
 - Recommendation: Owner 按项目既有流程审阅后决定
-- Owner Decision: 未决
-- Status: PENDING_OWNER
+- Owner Decision: 已授权（2026-10-18“合并到 main 并且发布”）；本提交经 --no-ff 合并至 main 并推送 origin/main
+- Status: RESOLVED
 
 ### D3 真实业务验收命令
 
@@ -129,8 +126,8 @@ Validation Commands:
 - Detected Evidence: `.cnb.yml` PR 阶段调用 `make test`，但仓库无 Makefile 与 Go module，命令当前不可执行
 - Options: 待业务代码落地后确认 / 现在就提供脚本
 - Recommendation: 在首个业务 Task 前由项目确定，不得虚构
-- Owner Decision: 未决
-- Status: PENDING_OWNER
+- Owner Decision: 未决（不阻断 ADOPTION_READY；阻断首个 Task 的正式交付）
+- Status: OPEN_TASK_PREREQUISITE
 
 ### D4 共享资源种类
 
@@ -139,8 +136,8 @@ Validation Commands:
 - Detected Evidence: 无迁移工具、无错误码域、无其他全局分配冲突证据
 - Options: NONE / 声明具体 kind
 - Recommendation: NONE（`resources: {}`），出现真实全局分配冲突时再增加
-- Owner Decision: 未决（当前以空资源配置记录）
-- Status: PENDING_OWNER
+- Owner Decision: 已确认 NONE（随本次合并一并确认；出现真实全局分配冲突时另行声明）
+- Status: RESOLVED
 
 ---
 
@@ -153,7 +150,7 @@ Validation Commands:
 | 共享资源 kind | NONE | `.agent/workflow.yaml` → `resources: {}` | 已创建 | DONE |
 | 框架文件 | 官方原样 | `.agent/{engine,roles,specs,templates,...}` | 逐字节复制 | DONE |
 | 宿主根 AGENTS.md | 不存在，不创建 | — | 不适用 | DONE |
-| 业务验收命令 | 未确认 | 项目构建/测试配置（Owner 决定） | 待决 | BLOCKED |
+| 业务验收命令 | 未确认 | 项目构建/测试配置（Owner 决定） | 待决 | OPEN（首个 Task 前置） |
 
 ---
 
@@ -195,24 +192,24 @@ Validation:
 - Workflow Design: PASS（官方 Spec 原样，未改）
 - Agent Prompts: PASS（25 份 Role Prompt 可读，未定制）
 - Task templates: PASS（`.agent/templates/` 原样）
-- Git authority: PASS（`verify-base --parent main --base 993f874...` 返回 ok；集成基线尚未形成）
+- Git authority: PASS（`verify-base --parent main --base 993f874...` 返回 ok；本记录随合并提交进入 main 后，集成基线为包含 `.agent/` 的 main）
 - Registry: NOT_APPLICABLE（无资源 kind）
 - Validator: PASS（test/vet/build + 六 CLI）
 - Machine Config: PASS（`workflow-check config`）
-- Project build/test mapping: BLOCKED（无业务代码与验收命令）
-- Owner decisions: PENDING（D1–D4）
-- Materialization completeness: 框架与配置已物化；业务验收命令未确认
+- Project build/test mapping: BLOCKED（无业务代码与验收命令，首个 Task 前置）
+- Owner decisions: D1/D2/D4 RESOLVED；D3 OPEN（Task 级前置）
+- Materialization completeness: 框架与配置已物化；业务验收命令待项目提供
 
 ---
 
 ## 9. Cleanup Check
 
 - [x] All required facts resolved（可检测事实已记录）
-- [ ] Owner decisions resolved
-- [x] Facts materialized（除待决验收命令）
+- [x] Owner decisions resolved（D1/D2/D4 已解决；D3 属 Task 级前置）
+- [x] Facts materialized（业务验收命令待项目提供，已记录在 D3）
 - [x] Registry initialized（NONE，合法空配置）
 - [x] Validator verified
-- [ ] No blocker（等待集成基线与业务验收命令）
+- [x] No blocker（接入无阻塞；首个 Task 仍缺真实验收命令）
 - [x] No critical information exists only in this temporary file
 
 只有全部通过：PROJECT_ADAPTATION.md may be deleted.
@@ -221,16 +218,15 @@ Validation:
 
 ## 10. Adoption Result
 
-RESULT: NOT_READY
+RESULT: READY
 
 Remaining Issues:
 
-- 适配分支尚未合入 `main`，当前 `main` 基线不含 `.agent/`，不能从该基线创建新 Task
-- 无业务代码、无 Go module、无真实验收命令（CI 的 `make test` 无对应目标）
-- D1–D4 待 Owner 决策
+- D3：无业务代码、无 Go module、无真实验收命令（CI 的 `make test` 无对应目标），阻断首个 Task 的正式交付，不阻断接入
+- 首个 Task 仍需真实 Discovery 与 Owner 批准；本记录不代表任何 Task 被批准
 
 Cleanup:
 
-- 本次保留临时文件；Owner 完成集成并确认后按模板删除
+- 保留本临时文件作为接入决策记录；其事实已在 `.agent/workflow.yaml`、`.agent/upstream.yaml` 与提交历史中长期留存，Owner 可随时删除
 
 PROJECT_ADAPTATION.md: RETAINED
