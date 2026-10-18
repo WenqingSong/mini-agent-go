@@ -1,7 +1,32 @@
 # Project-owned provenance. Fill from VERIFIED upstream, never host HEAD.
 schema_version: 1
 repository: https://cnb.cool/framework-station/agent-workflow
-commit: 1fc5c6dc88fc7f417374e37e7354a3a6c4e07a65
-version: 4.2.1
+commit: 0c62d1c07bc9a98120c7a11b9cd3bbeae104a2f0
+version: 4.3.0-dev
 subdirectory: .agent
 local_changes: null
+
+# Migration provenance (verified by B/L/N three-way comparison, 2026-10-18).
+adopted_ref: refs/heads/main
+adopted_ref_commit: 0c62d1c07bc9a98120c7a11b9cd3bbeae104a2f0
+previous_commit: 1fc5c6dc88fc7f417374e37e7354a3a6c4e07a65
+previous_version: 4.2.1
+previous_ref: refs/tags/v4.2.1
+release_channel: development
+migration_scope:
+  - rebase framework assets (.agent/engine, roles, specs, templates, AGENTS.md, README.md, assistant-context.md) onto 4.3.0-dev
+  - adopt unified public entry roles/DiscoveryAgent.md and roles/TaskBuilderAgent.md
+  - retire duplicate per-workflow DiscoveryAgent.md and TaskBuilderAgent.md under roles/{normal,complex,design}
+  - add specs/workflows/EntryWorkflow.md and the taskbuilder-init initialization policy implementation
+  - add engine regression tests taskbuilder_initialization_test.go and unified_entry_test.go
+preserved_local_changes:
+  - .agent/workflow.yaml (project machine config; untouched)
+  - .agent/upstream.yaml (this project-owned provenance file)
+  - .agent/PROJECT_ADAPTATION.md (project adoption record; untouched)
+  - .agent/bin/ (git-ignored rebuildable CLI binaries; not committed)
+  - no project-local edits existed in framework files at migration time
+compatibility_limits:
+  - 4.3.0-dev is a development version, not a released 4.3.0; no upstream tag exists for it
+  - historical per-workflow entry paths stay as a mapping table only; old Task branches keep their original role files and evidence
+  - no runtime data existed in .agent/tasks, .agent/programs, .agent/intake, .agent/registry, .agent/mastery at migration time
+  - schema 2/3 historical tasks remain T0 read-only; no T2 in-place schema migration is performed
