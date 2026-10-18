@@ -1,0 +1,6 @@
+schema_version: 1
+
+git:
+  integration_branch: main
+
+resources: {}
