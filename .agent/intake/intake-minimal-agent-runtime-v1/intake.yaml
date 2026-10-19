@@ -1,0 +1,3 @@
+intake_id: intake-minimal-agent-runtime-v1
+parent_branch: develop
+base_commit: "b43cdfbf78e3eef626e2af6f59c7ef675196da60"
