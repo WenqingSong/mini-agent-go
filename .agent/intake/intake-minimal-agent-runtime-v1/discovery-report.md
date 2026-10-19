@@ -132,3 +132,61 @@ PASS     gate=discovery-start
 ## 12. 停止条件检查
 
 - 父分支候选与 Git Base 已可靠识别并远程核验；无跨模块不可界定边界；无关键业务规则缺失导致的范围分歧；Owner 决策中未含 task_id/task_type——按规范属于「尚未确认具体 Task/类型」，停在决策检查点，不生成 APPROVED，不进入 finalize。
+
+## 13. 第二阶段执行记录与 Gate 证据（2026-10-19）
+
+Owner 已批准首个正式设计任务（task_id=`minimal-agent-runtime-design-v1`，task_type=DESIGN，parent_branch=develop，base_commit=`c398e8ab2b29335889c9e093369b80f2ebe8cd68`，Design Impact=NEW），并附带项目级决策（Program/COORDINATED 规划基线、develop 为唯一集成目标、收费 API 控制等）。
+
+### 13.1 字段核验结果（先核验后记录）
+
+| 核验项 | 结果 | 证据 |
+| --- | --- | --- |
+| task_id 格式 | 符合 | `minimal-agent-runtime-design-v1` 匹配安全单一路径段规则（`^[A-Za-z0-9][A-Za-z0-9._-]*$`） |
+| task_id 唯一性 | 符合 | 无 `.agent/tasks/`、无同名分支（`workflow-git branch-exists` → missing）、无同名 Worktree、仓库无既有引用 |
+| base_commit 有效性 | 符合（作为 Git Base） | `c398e8a...` 为真实 commit，且为 `develop` 与 `origin/develop` 当前 tip；`verify-base --parent develop --base c398e8a...` → ok |
+| DESIGN 初始化要求 | 符合 | handoff 绑定 `task_type=DESIGN`；DesignWorkflow 规定 TaskBuilder 初始化 schema 4：contract.status=NOT_REQUIRED、design.status=PENDING、approved_version/final_version=0、review=NOT_REQUESTED、owner=PENDING、delivery=NOT_RUN、初始 Handoff next_role=Architect |
+| base 与 Intake 锚点绑定 | **不符合（阻塞）** | 见 13.3 |
+
+### 13.2 已持久化的产物
+
+- `.agent/intake/intake-minimal-agent-runtime-v1/owner-decision.md`：按 Owner 明确决策机械记录，front-matter 为 decision=APPROVED、intake_id、task_id、task_type=DESIGN、parent_branch=develop、base_commit=`c398e8ab2b29335889c9e093369b80f2ebe8cd68`；正文含批准范围与核验状态。
+
+### 13.3 实际 Gate 运行证据
+
+运行时间（UTC）：2026-10-19T07:47:13Z 前后；均在宿主根执行，只读。
+
+```bash
+.agent/bin/workflow-check gate discovery-decision .agent/intake/intake-minimal-agent-runtime-v1
+```
+
+退出码：`0`；原始输出：
+
+```text
+PASS     gate=discovery-decision
+```
+
+为取得真实机器结果，曾按 Owner 批准值临时写入 `taskbuilder-handoff.md`（未提交、运行后即删除，未保留无效产物），并运行：
+
+```bash
+.agent/bin/workflow-check gate discovery-handoff .agent/intake/intake-minimal-agent-runtime-v1
+```
+
+退出码：`1`；原始输出：
+
+```text
+FAIL     gate=discovery-handoff task=intake-minimal-agent-runtime-v1 check=Discovery Handoff actual=taskbuilder-handoff.base_commit=c398e8ab2b29335889c9e093369b80f2ebe8cd68 expected=b43cdfbf78e3eef626e2af6f59c7ef675196da60 reason=TaskBuilder Handoff 的 base_commit 与 Intake 基线不一致
+```
+
+### 13.4 冲突根因（机器规则，已核验引擎实现）
+
+1. `intake.yaml` 锚定 `base_commit=b43cdfbf78e3eef626e2af6f59c7ef675196da60`（调查时的 Git Base，属「初始父分支与 Commit 不会丢失」的不可变事实，不得改写）；
+2. `GateDiscoveryHandoff` 要求 `taskbuilder-handoff.base_commit == intake.yaml.base_commit`（引擎 `discovery_gate.go` 的 Discovery Handoff 检查）；
+3. `intakeDecisionBinding` 进一步要求 owner-decision 的 base 与 handoff、Intake 三方相等；
+4. EntryWorkflow 明确规定 TaskBuilder「不以 Intake tip 替换原 Base」——Owner 批准的 `c398e8a` 正是本 Intake 的证据提交（Intake tip）。
+
+因此：按批准值生成 handoff → `discovery-handoff` FAIL（已实测）；若改用 Intake 锚点值 → 属于擅自替换 Owner 批准的基线，明令禁止。在 Owner 就 base 作出新的明确决定前，不生成 `taskbuilder-handoff.md`，不进入 TaskBuilder 初始化。
+
+### 13.5 待 Owner 决定后执行的下一步
+
+- 若 Owner 确认 base=`b43cdfbf78e3eef626e2af6f59c7ef675196da60`：按明确指令机械更正 owner-decision.md 的 base 字段（git 历史保留原记录），生成 `taskbuilder-handoff.md`，重跑 `discovery-decision` / `discovery-handoff`（按引擎逻辑预期 PASS），提交推送；
+- 若 Owner 坚持 `c398e8a`：需 Owner 对该规则冲突作明确决定，Discovery 不自行偏离。
