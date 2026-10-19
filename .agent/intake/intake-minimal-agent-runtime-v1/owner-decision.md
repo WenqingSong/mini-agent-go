@@ -4,20 +4,26 @@ intake_id: intake-minimal-agent-runtime-v1
 task_id: minimal-agent-runtime-design-v1
 task_type: DESIGN
 parent_branch: develop
-base_commit: c398e8ab2b29335889c9e093369b80f2ebe8cd68
+base_commit: b43cdfbf78e3eef626e2af6f59c7ef675196da60
 ---
 
 # Owner 决策记录 — intake-minimal-agent-runtime-v1
 
-记录时间：2026-10-19（UTC）。本文件由 Discovery 在收到 Owner 明确决策后机械持久化，front-matter 为机器可读绑定字段。
+记录时间：2026-10-19（UTC）；base 修正时间：2026-10-19（UTC）。本文件由 Discovery 在收到 Owner 明确决策（含修正）后机械持久化；front-matter 为机器可读绑定字段，以最近一次明确修正为准，历史不在本文件抹去（见「决策修正记录」）。
 
-## 批准的 Task
+## 批准的 Task（当前有效值）
 
 - task_id：`minimal-agent-runtime-design-v1`
 - task_type：`DESIGN`
 - parent_branch：`develop`
-- base_commit：`c398e8ab2b29335889c9e093369b80f2ebe8cd68`
+- base_commit：`b43cdfbf78e3eef626e2af6f59c7ef675196da60`
 - Design Impact：`NEW`
+
+## 决策修正记录（保留历史，不抹去）
+
+- **原批准（2026-10-19）**：base_commit=`c398e8ab2b29335889c9e093369b80f2ebe8cd68`。该值是本 Intake 的证据提交；Owner 说明原因是「误将 Intake 证据提交误认为任务开发基线」，该值**不再作为本任务的批准 Base**。
+- **本次修正（2026-10-19，Owner 明确指令）**：base_commit 修正为 `b43cdfbf78e3eef626e2af6f59c7ef675196da60`，与 `intake.yaml` 的原始锚点一致，符合「不以 Intake tip 替换原 Base」。
+- **历史保留**：含原批准值的 `owner-decision.md` 版本保存在 commit `43ae7766626b309b15663d0f2c209a5032399fab`，未改写、未回滚；`intake.yaml` 的原始 Base 未做任何修改；task_id / task_type / parent_branch / Design Impact 自原批准起未变。
 
 ## 批准的设计交付范围
 
@@ -48,6 +54,6 @@ base_commit: c398e8ab2b29335889c9e093369b80f2ebe8cd68
 
 - task_id 格式：符合（单一路径段标识，可用于 `.agent/tasks/<id>/`）；
 - task_id 唯一性：符合（无同名 Task/Program/分支/Worktree，无既有引用）；
-- base_commit 有效性：`c398e8ab2b29335889c9e093369b80f2ebe8cd68` 为真实 commit，且是 `develop` 与 `origin/develop` 的当前 tip，`verify-base` 通过；
-- DESIGN 初始化要求：handoff 绑定 `task_type=DESIGN`，与 DesignWorkflow 的 TaskBuilder 初始化字段（contract.status=NOT_REQUIRED、design.status=PENDING、初始 Handoff next_role=Architect）匹配；
-- **未决冲突**：本 Intake 的 `intake.yaml` 锚定 base_commit=`b43cdfbf78e3eef626e2af6f59c7ef675196da60`（调查时的 Git Base，不可变），与本次批准的 base_commit 不一致；`discovery-handoff` Gate 要求 handoff/decision 的 base 与 Intake 记录相等，且 EntryWorkflow 规定「不以 Intake tip 替换原 Base」。因此 `taskbuilder-handoff.md` 在 base 确认前无法生成，详见 `discovery-report.md` 第二阶段执行记录。
+- base_commit 有效性：`b43cdfbf78e3eef626e2af6f59c7ef675196da60` 为真实 commit，且为 `develop` 当前 tip 的祖先（`verify-base` 通过）；
+- DESIGN 初始化要求：符合（handoff 绑定 `task_type=DESIGN`；DesignWorkflow 规定 TaskBuilder 初始化 schema 4：contract.status=NOT_REQUIRED、design.status=PENDING、初始 Handoff next_role=Architect）；
+- base 与 Intake 锚点绑定：已一致（owner-decision / taskbuilder-handoff / intake.yaml 三方均为 `b43cdfbf78e3eef626e2af6f59c7ef675196da60`）；`taskbuilder-handoff.md` 已按修正值生成，Gate 实测证据见 `discovery-report.md` §13–§14。

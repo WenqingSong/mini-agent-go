@@ -190,3 +190,45 @@ FAIL     gate=discovery-handoff task=intake-minimal-agent-runtime-v1 check=Disco
 
 - 若 Owner 确认 base=`b43cdfbf78e3eef626e2af6f59c7ef675196da60`：按明确指令机械更正 owner-decision.md 的 base 字段（git 历史保留原记录），生成 `taskbuilder-handoff.md`，重跑 `discovery-decision` / `discovery-handoff`（按引擎逻辑预期 PASS），提交推送；
 - 若 Owner 坚持 `c398e8a`：需 Owner 对该规则冲突作明确决定，Discovery 不自行偏离。
+
+## 14. 决策修正与 Gate 复验（2026-10-19）
+
+### 14.1 修正内容（Owner 明确指令；历史保留）
+
+- 原批准 base_commit=`c398e8ab2b29335889c9e093369b80f2ebe8cd68`（Owner 说明：误将 Intake 证据提交误认为任务开发基线），**不再作为本任务批准 Base**；
+- 修正为 `b43cdfbf78e3eef626e2af6f59c7ef675196da60`，与 `intake.yaml` 原始锚点一致；
+- `intake.yaml` 未做任何修改；含原批准值的 `owner-decision.md` 保留于 commit `43ae7766626b309b15663d0f2c209a5032399fab`；task_id / task_type=DESIGN / parent_branch=develop / Design Impact=NEW 不变。
+
+### 14.2 重新生成的产物
+
+- `owner-decision.md`：front-matter base 机械更正为 `b43cdfbf78e3eef626e2af6f59c7ef675196da60`，正文新增「决策修正记录」保留原批准与修正原因；
+- `taskbuilder-handoff.md`：按修正值生成，front-matter 六字段（intake_id / owner_decision=APPROVED / parent_branch=develop / base_commit=b43cdfbf… / task_type=DESIGN / task_id=minimal-agent-runtime-design-v1）。
+
+### 14.3 Gate 复验证据（真实运行，只读）
+
+运行时间（UTC）：2026-10-19T07:53:04Z；宿主根执行。
+
+```bash
+.agent/bin/workflow-check gate discovery-decision .agent/intake/intake-minimal-agent-runtime-v1
+```
+
+退出码：`0`；原始输出：
+
+```text
+PASS     gate=discovery-decision
+```
+
+```bash
+.agent/bin/workflow-check gate discovery-handoff .agent/intake/intake-minimal-agent-runtime-v1
+```
+
+退出码：`0`；原始输出：
+
+```text
+PASS     gate=discovery-handoff
+```
+
+### 14.4 当前状态
+
+- 两个 Gate 均 PASS；Intake 四文件中 `intake.yaml` / `discovery-report.md` / `owner-decision.md` / `taskbuilder-handoff.md` 均已形成并提交推送；
+- 状态：等待 Owner 启动 TaskBuilder 初始化设计任务；本轮回合未创建 Task、未启动 Architect、未实施业务代码；`main` 未动，开发与集成目标仍为 `develop`。
