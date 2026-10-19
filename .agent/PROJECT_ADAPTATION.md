@@ -74,12 +74,12 @@ Existing Workflow Assets:
 
 ## 3. Proposed Workflow Mapping
 
-- Shared Integration Branch: `main`（唯一分支且为远端默认分支）
+- Shared Integration Branch: `develop`（2026-10-19 由 D5 调整；Adoption 时为 `main`，见 D1）
 - Feature Branch Convention: 未建立；适配分支为 `adoption/agent-workflow-v4.2.1`
 - Design Authority Root: 未建立
 - Workflow Task Root: `.agent/tasks/`（首个真实 Task 由 Discovery/TaskBuilder 创建）
 - Registry Root: `.agent/registry/`（当前无已确认共享资源，未创建文件）
-- Machine Config (.agent/workflow.yaml): integration_branch=main + resources={}
+- Machine Config (.agent/workflow.yaml): integration_branch=develop（2026-10-19 D5 更新）+ resources={}
 
 Migration Registry: NOT_APPLICABLE
 
@@ -108,6 +108,7 @@ Validation Commands:
 - Recommendation: main（唯一既有约定）
 - Owner Decision: 已确认 main（2026-10-18 Owner 明确授权合并到 main 并发布）
 - Status: RESOLVED
+- Later Change: 2026-10-19 D5 将 `git.integration_branch` 调整为 `develop`；本条保留为当时决策历史
 
 ### D2 适配分支集成授权
 
@@ -139,6 +140,16 @@ Validation Commands:
 - Owner Decision: 已确认 NONE（随本次合并一并确认；出现真实全局分配冲突时另行声明）
 - Status: RESOLVED
 
+### D5 集成分支调整为 develop
+
+- Decision ID: D5
+- Question: 是否将项目级 `git.integration_branch` 从 `main` 调整为 `develop`？
+- Detected Evidence: `main` 与 `develop` 同 SHA `22e4d2c1cb9b9620739fbdeee587676c96c56847`；`origin/develop` 存在且同 SHA；Engine 仅通过 `config.Git.IntegrationBranch` 解析集成分支（`validator.developRef`、`PlanTask`/`ExecuteTask`、Program 交付校验），非测试源码无 `main`/`develop` 硬编码
+- Options: 保持 main / 调整为 develop
+- Recommendation: develop（Owner 规范：develop 为开发基线与最终集成、交付目标）
+- Owner Decision: 已由 Owner 于 2026-10-19 指定调整为 `develop`；`main` 不在本任务变更范围
+- Status: RESOLVED
+
 ---
 
 ## 5. Materialization Plan
@@ -146,7 +157,7 @@ Validation Commands:
 | Item | Final Decision | Authoritative Destination | Action | Status |
 | --- | --- | --- | --- | --- |
 | Workflow 版本与来源 | 4.2.1 / 1fc5c6dc88fc7f417374e37e7354a3a6c4e07a65 | `.agent/upstream.yaml` | 已创建 | DONE |
-| 集成分支 | main | `.agent/workflow.yaml` → `git.integration_branch` | 已创建 | DONE |
+| 集成分支 | develop（2026-10-19 D5 更新；Adoption 时为 main） | `.agent/workflow.yaml` → `git.integration_branch` | 已更新 | DONE |
 | 共享资源 kind | NONE | `.agent/workflow.yaml` → `resources: {}` | 已创建 | DONE |
 | 框架文件 | 官方原样 | `.agent/{engine,roles,specs,templates,...}` | 逐字节复制 | DONE |
 | 宿主根 AGENTS.md | 不存在，不创建 | — | 不适用 | DONE |
@@ -196,8 +207,9 @@ Validation:
 - Registry: NOT_APPLICABLE（无资源 kind）
 - Validator: PASS（test/vet/build + 六 CLI）
 - Machine Config: PASS（`workflow-check config`）
+- 集成分支切换（D5，2026-10-19）: PASS（`integration_branch=develop`；`workflow-check config` PASS；`GOWORK=off go -C .agent/engine test ./...` PASS；Engine 集成分支读取点全部来自机器配置）
 - Project build/test mapping: BLOCKED（无业务代码与验收命令，首个 Task 前置）
-- Owner decisions: D1/D2/D4 RESOLVED；D3 OPEN（Task 级前置）
+- Owner decisions: D1/D2/D4/D5 RESOLVED；D3 OPEN（Task 级前置）
 - Materialization completeness: 框架与配置已物化；业务验收命令待项目提供
 
 ---
