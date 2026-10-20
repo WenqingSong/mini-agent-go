@@ -17,10 +17,10 @@ owner:
   review_target: "8e4d2fd"
 
 delivery:
-  status: NOT_RUN
-  review_target: ""
-  feature_head: ""
-  develop_base: ""
+  status: PASS
+  review_target: "8e4d2fd"
+  feature_head: "ce0f507"
+  develop_base: "6902d24"
 
 blocked:
   active: false
