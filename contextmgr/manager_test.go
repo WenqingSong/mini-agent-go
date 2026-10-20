@@ -998,3 +998,128 @@ func TestBuildDoesNotMutateInput(t *testing.T) {
 		t.Fatalf("Build() 不得修改调用方输入消息")
 	}
 }
+
+// TestBuildCompactionBudgetBoundaryExactFit 固定 R1「单次压缩 + KeepRecent 硬下限」在预算临界点
+// 的两侧行为（Contract 压缩算法 4–5 步、INV-008）：
+//
+//   - 压缩后视图估算恰好等于 TokenBudget → 成功（Compacted=true、DroppedMessages 与实差一致、
+//     保留条数 >= KeepRecent、Summarizer 恰好调用 1 次、估算值精确等于预算而不是略小于）；
+//   - 预算再少 1 token → invalid_argument、零值 Result、Summarizer 仍恰好调用 1 次（不重试、
+//     不吞并保留消息）。
+//
+// 夹具刻意使用多消息工具 Unit 与正 KeepRecent，使保留边界落在「assistant 携带的 ToolCalls +
+// 其全部 ToolResults」之外，保证保留条数按消息条数计算。
+func TestBuildCompactionBudgetBoundaryExactFit(t *testing.T) {
+	est := staticEstimator{perMessage: 1}
+
+	// 原子单元：u0=[m1] | u1=[m2,m3] | u2=[m4] | u3=[m5,m6,m7]，共 7 条消息。
+	messages := []core.Message{
+		userText("m1", "旧问"),
+		assistantCalls("m2", "", call("c1", "read_file", `{"path":"a"}`)),
+		toolMsg("m3", "c1", "A"),
+		userText("m4", "继续"),
+		assistantCalls("m5", "", call("c2", "read_file", `{"path":"b"}`), call("c3", "echo", `{"text":"hi"}`)),
+		toolMsg("m6", "c2", "B"),
+		toolMsg("m7", "c3", "ok"),
+	}
+
+	// 视图前缀 = System Prompt + 摘要（staticEstimator 各计 1 token）。
+	const prefixTokens = 2
+	const systemPrompt = "系统提示"
+	const previousSummary = "旧摘要"
+	const newSummary = "边界摘要"
+
+	cases := []struct {
+		name       string
+		keepRecent int
+		dropped    int // 压缩覆盖的输入前缀条数
+	}{
+		// KeepRecent=3：最小尾部恰为 u3（3 条），压缩 m1..m4。
+		{name: "KeepRecent=3 保留尾部恰为多消息工具单元", keepRecent: 3, dropped: 4},
+		// KeepRecent=4：最小尾部为 u2+u3（4 条），压缩 m1..m3。
+		{name: "KeepRecent=4 保留尾部跨入单条 user 单元", keepRecent: 4, dropped: 3},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			need := prefixTokens + tc.keepRecent
+
+			t.Run("预算恰好等于压缩后视图估算", func(t *testing.T) {
+				sum := &fakeSummarizer{summary: newSummary}
+				mgr := newTestManager(t, est, sum)
+
+				result, err := mgr.Build(context.Background(), Request{
+					SystemPrompt:    systemPrompt,
+					PreviousSummary: previousSummary,
+					Messages:        cloneMessages(messages),
+					TokenBudget:     need,
+					KeepRecent:      tc.keepRecent,
+				})
+				if err != nil {
+					t.Fatalf("预算恰好等于压缩后视图估算时应成功，实际返回错误：%v", err)
+				}
+				if !result.Compacted {
+					t.Fatalf("超预算触发压缩后 Compacted 必须为 true：%+v", result)
+				}
+				if result.DroppedMessages != tc.dropped {
+					t.Fatalf("DroppedMessages = %d，期望 %d", result.DroppedMessages, tc.dropped)
+				}
+				if len(result.Messages) != prefixTokens+tc.keepRecent {
+					t.Fatalf("视图长度 = %d，期望 %d", len(result.Messages), prefixTokens+tc.keepRecent)
+				}
+
+				retained := result.Messages[prefixTokens:]
+				if len(retained) < tc.keepRecent {
+					t.Fatalf("保留条数 = %d，低于 KeepRecent=%d 下限", len(retained), tc.keepRecent)
+				}
+				if result.DroppedMessages != len(messages)-len(retained) {
+					t.Fatalf("DroppedMessages = %d 与实差 %d 不一致", result.DroppedMessages, len(messages)-len(retained))
+				}
+				assertSameMessages(t, "保留区间", retained, messages[tc.dropped:])
+
+				if got := viewTokens(est, result.Messages); got != need {
+					t.Fatalf("压缩后视图估算值 = %d，期望恰好等于 TokenBudget=%d（不多压也不少压）", got, need)
+				}
+				if err := core.ValidateMessages(result.Messages); err != nil {
+					t.Fatalf("视图未通过 core.ValidateMessages：%v", err)
+				}
+				if result.Summary != newSummary || messageText(t, result.Messages[1]) != result.Summary {
+					t.Fatalf("摘要文本与 Summary 不一致：%q vs %q", messageText(t, result.Messages[1]), result.Summary)
+				}
+				if sum.calls != 1 {
+					t.Fatalf("Summarizer 调用次数 = %d，期望恰好 1 次", sum.calls)
+				}
+				assertSameMessages(t, "Summarizer 待压缩前缀", sum.requests[0].Messages, messages[:tc.dropped])
+				if sum.requests[0].PreviousSummary != previousSummary {
+					t.Fatalf("Summarizer 必须收到旧摘要以合并，实际为 %q", sum.requests[0].PreviousSummary)
+				}
+			})
+
+			t.Run("预算少 1 token", func(t *testing.T) {
+				sum := &fakeSummarizer{summary: newSummary}
+				mgr := newTestManager(t, est, sum)
+
+				result, err := mgr.Build(context.Background(), Request{
+					SystemPrompt:    systemPrompt,
+					PreviousSummary: previousSummary,
+					Messages:        cloneMessages(messages),
+					TokenBudget:     need - 1,
+					KeepRecent:      tc.keepRecent,
+				})
+				if err == nil {
+					t.Fatalf("预算少 1 token 时应显式失败，实际返回 %+v", result)
+				}
+				if kind := core.KindOf(err); kind != core.KindInvalidArgument {
+					t.Fatalf("错误种类 = %q，期望 %q（错误：%v）", kind, core.KindInvalidArgument, err)
+				}
+				if !strings.Contains(err.Error(), "KeepRecent") {
+					t.Fatalf("错误文本 %q 未指出保留下限约束", err.Error())
+				}
+				assertZeroResult(t, result)
+				if sum.calls != 1 {
+					t.Fatalf("失败路径 Summarizer 调用次数 = %d，期望恰好 1 次（不重试）", sum.calls)
+				}
+			})
+		})
+	}
+}
