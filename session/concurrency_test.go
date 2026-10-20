@@ -266,3 +266,123 @@ func TestTurnTodoWritesFromMultipleGoroutines(t *testing.T) {
 		t.Fatalf("提交后 Todo 数量应为 %d，实际 %d", writers, got)
 	}
 }
+
+// TestTurnDropLeadingConcurrentWithAppendAndSummary 覆盖 AC-006 / D3 的并发部分：
+// 同一 Turn 内多 goroutine 并发调用 DropLeading / Append / SetSummary / Session，
+// 无 panic、无死锁、无 data race；提交后的条数按「成功删除数 / 成功追加数」结算，
+// 剩余历史仍是原历史的后缀，追加消息完整出现且不重复。
+func TestTurnDropLeadingConcurrentWithAppendAndSummary(t *testing.T) {
+	const (
+		droppers  = 6
+		appenders = 6
+		perAppend = 2
+	)
+	ctx := context.Background()
+	m := NewManager(ManagerConfig{})
+	mustCreate(t, m, "s-1")
+	base := []core.Message{
+		userMessage("b1", "基线 1"),
+		userMessage("b2", "基线 2"),
+		userMessage("b3", "基线 3"),
+		userMessage("b4", "基线 4"),
+	}
+	mustSaveHistory(t, m, "s-1", base)
+
+	var (
+		mu       sync.Mutex
+		dropped  int
+		appended []string
+		failures []error
+	)
+	err := m.RunTurn(ctx, "s-1", func(turn *Turn) error {
+		var wg sync.WaitGroup
+		for i := 0; i < droppers; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				err := turn.DropLeading(1)
+				mu.Lock()
+				defer mu.Unlock()
+				switch {
+				case err == nil:
+					dropped++
+				case core.KindOf(err) == core.KindInvalidArgument:
+					// 当前剩余已提交历史不足时的合法拒绝，不计入成功次数。
+				default:
+					failures = append(failures, err)
+				}
+			}()
+		}
+		for i := 0; i < appenders; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				batch := make([]core.Message, 0, perAppend)
+				for j := 0; j < perAppend; j++ {
+					batch = append(batch, userMessage(fmt.Sprintf("a%d-%d", i, j), "并发追加"))
+				}
+				err := turn.Append(batch...)
+				mu.Lock()
+				defer mu.Unlock()
+				if err != nil {
+					failures = append(failures, err)
+					return
+				}
+				for _, msg := range batch {
+					appended = append(appended, msg.ID)
+				}
+			}(i)
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = turn.Session()
+			turn.SetSummary("并发摘要")
+		}()
+		wg.Wait()
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("并发 Turn 应成功提交：%v", err)
+	}
+	if len(failures) > 0 {
+		t.Fatalf("并发调用不应产生契约外失败：%v", failures)
+	}
+
+	// 每次 DropLeading(1) 在剩余历史非空时必然成功，因此全部基线消息都被删除。
+	if dropped != len(base) {
+		t.Fatalf("成功删除数应为 %d，实际 %d", len(base), dropped)
+	}
+	remainingBase := len(base) - dropped
+
+	final := mustGet(t, m, "s-1")
+	if want := remainingBase + len(appended); len(final.Messages) != want {
+		t.Fatalf("提交后条数应为 %d，实际 %d（%v）", want, len(final.Messages), messageIDs(final.Messages))
+	}
+	if final.Summary != "并发摘要" {
+		t.Fatalf("并发写入的摘要应提交，实际 %q", final.Summary)
+	}
+
+	// 保留下来的已提交历史必须是原历史的后缀，顺序不变。
+	wantPrefix := messageIDs(base[dropped:])
+	for i, id := range wantPrefix {
+		if final.Messages[i].ID != id {
+			t.Fatalf("第 %d 条应为 %q，实际 %q", i, id, final.Messages[i].ID)
+		}
+	}
+
+	// 追加消息必须全部出现且不重复。
+	seen := make(map[string]struct{}, len(appended))
+	for _, id := range appended {
+		seen[id] = struct{}{}
+	}
+	for _, msg := range final.Messages[remainingBase:] {
+		if _, ok := seen[msg.ID]; !ok {
+			t.Fatalf("出现非本 Turn 追加的消息 %q", msg.ID)
+		}
+		delete(seen, msg.ID)
+	}
+	if len(seen) != 0 {
+		t.Fatalf("追加消息缺失：%v", seen)
+	}
+}
