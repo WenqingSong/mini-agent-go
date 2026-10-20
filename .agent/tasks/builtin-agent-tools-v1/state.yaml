@@ -2,8 +2,8 @@ schema_version: 3
 task_id: builtin-agent-tools-v1
 
 contract:
-  status: PENDING
-  target: ""
+  status: APPROVED
+  target: "786d6fd80005c277346a8c7f0b5d4753eadc4f61"
 
 resources:
   reservations: {}
