@@ -2,8 +2,8 @@ schema_version: 3
 task_id: runtime-observability-v1
 
 contract:
-  status: PENDING
-  target: ""
+  status: APPROVED
+  target: "6b68fc8"
 
 resources:
   reservations: {}
