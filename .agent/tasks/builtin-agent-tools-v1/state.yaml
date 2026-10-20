@@ -1,0 +1,28 @@
+schema_version: 3
+task_id: builtin-agent-tools-v1
+
+contract:
+  status: APPROVED
+  target: "786d6fd80005c277346a8c7f0b5d4753eadc4f61"
+
+resources:
+  reservations: {}
+
+review:
+  status: CLEAN
+  target: "92068976d73d29384c9227fc90d648fb3ddb3261"
+
+owner:
+  status: ACCEPTED
+  review_target: "92068976d73d29384c9227fc90d648fb3ddb3261"
+
+delivery:
+  status: PASS
+  review_target: "92068976d73d29384c9227fc90d648fb3ddb3261"
+  feature_head: "16554ef704f5182b62b92e80fbe6c3b69dd2ae86"
+  develop_base: "6902d2445665ec356a2db22b33b7749d39d8018e"
+
+blocked:
+  active: false
+  by: ""
+  reason: ""
