@@ -3,7 +3,7 @@ task_id: agent-context-manager-v1
 
 contract:
   status: APPROVED
-  target: "624a0944c8642cce827447c907799ff1f344bddc"
+  target: "8e84932a1152889e35a5be6997c9721184f796d9"
 
 resources:
   reservations: {}
