@@ -2,8 +2,8 @@ schema_version: 3
 task_id: tool-registry-executor-v1
 
 contract:
-  status: PENDING
-  target: ""
+  status: APPROVED
+  target: "95e10b2f902d28411062bc16812e6887e87853d6"
 
 resources:
   reservations: {}
