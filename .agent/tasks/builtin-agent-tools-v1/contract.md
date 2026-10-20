@@ -2,13 +2,14 @@
 
 ## Decision Status
 
-`WAITING_FOR_OWNER_COORDINATION`（D7）；`OWNER_DIRECTION_APPROVED`（2026-10-20，D1—D6）仍有效，但**正式 `APPROVED` 尚未成立**。
+`APPROVED`（2026-10-20，D1—D7 全部裁决）。Evidence Commit A1 = 本文件最终版本；Metadata Commit A2 只写 `state.yaml` 的 `contract.status=APPROVED` / `contract.target=A1`。
 
 - D6 前置已满足：TaskBuilder 已在 `a2c92d6` 规范化 `task.md`（Design Impact 冲突消除、5 工具、AC-006 证据口径收窄、新增 AC-009）。
-- **新阻塞（D7）**：T04 现已有 APPROVED Contract + Design 更新（`origin/feat/agent-session-manager-v1` `0d9797b`），其中 `session.TodoOperations` 的方法集为 `Todos()` / `PutTodo(Todo)` / `DeleteTodo(id)`，与 Owner D1 明确的 `Create` / `List` / `Complete` **不一致**，且不提供 Todo ID 生成与状态迁移。按 Owner D1「T04 的既有 Task / Contract 与该安排冲突必须先报告并协调，不得单方面修改」，本 Contract 停在 D7，等 Owner 裁决接口归属。
-- 因此不执行 A1/A2、不更新 `docs/design/*`、不启动 Coder。
+- **D7 已裁决（方案②，2026-10-20）**：T03 保留 `builtin.TodoOperations`（`Create` / `List` / `Complete`）与 `builtin.ErrTodoNotFound`；T04 继续使用其已批准的 `session.TodoOperations`，本轮不修改 T04 Contract；两分支并行开发，各自 Design 留在本分支，集成时解决冲突；接口适配、Todo ID 生成、状态迁移与错误映射由 **T07** 明确承担并验收。
+- D7 结论不改变本 Contract 的公共符号：`Interfaces and Data` 仍以 `builtin` 归属为准；`Verification Requirements` 不变。
+- 后续：Analyst 依本 Contract 更新 `docs/design/runtime-architecture.md`（Design Impact `UPDATE`），随后启动 Coder。
 
-`state.contract.status` 保持 `PENDING`（schema 无「方向已批准 / 待协调」枚举，不提前写入 `APPROVED`）。
+`state.contract.status` 在 A2 写入 `APPROVED`。
 
 任务：`builtin-agent-tools-v1`（Design Impact `UPDATE` → `docs/design/runtime-architecture.md`，见 D6）。
 
@@ -33,7 +34,7 @@
 - VERIFIED：T04 与 T02 各自在 Design §11 新增了 `INV-009`…（T02 到 `INV-013`、T04 到 `INV-016`），两条分支编号互相重叠；本任务不得再占用同一号段（见 `Coordination`）。
 - VERIFIED：`tool-registry-executor-v1` 已提交 `tool/registry.go` / `validate.go` / `executor.go` 及测试；`session/**` 在 T04 分支尚未提交实现（只有 Contract + Design）。`builtin/` 不被任何分支占用。
 - VERIFIED：`.agent/workflow.yaml` 为 `resources: {}`；`state.yaml` 为 `schema_version: 3`；本任务不占用任何全局资源。
-- UNKNOWN：D7 裁决前，`todo_*` 工具应接收 `builtin.TodoOperations` 还是 `session.TodoOperations`；T07 装配层任务尚未创建。
+- RESOLVED（D7，方案②）：`todo_*` 工具接收 `builtin.TodoOperations`；T04 的 `session.TodoOperations` 保持不变；两者之间的适配由 T07 承担（见 `Coordination` C1 / C4）。T07 装配层任务尚未创建。
 
 ## Recommendation（已被 Owner 调整）
 
@@ -41,7 +42,7 @@ RECOMMENDATION 已由 Owner 有条件批准并调整（D6 前置：`task.md` 已
 
 | 项 | 原推荐 | Owner 决定 |
 | --- | --- | --- |
-| Todo 端口命名 | `TodoStore` | `TodoOperations`（Create / List / Complete）；**归属待 D7** |
+| Todo 端口命名 | `TodoStore` | `TodoOperations`（Create / List / Complete）；按 D7② 归 `builtin` |
 | 生产内存实现 | 包内提供 `MemoryTodoStore` | **不提供**；真实 Todo 数据与生命周期归 T04，T03 只用测试专用 Fake |
 | 已取消状态 | 额外 `todo_cancelled` 领域错误 | 不引入；状态机归 T04，T03 只映射「不存在」 |
 | 并发证据 | 由 `MemoryTodoStore` 证明会话级并发 | 工具层证据（无共享可变状态 + `-race`），真实会话并发与隔离归 T04/T07 |
@@ -50,18 +51,16 @@ RECOMMENDATION 已由 Owner 有条件批准并调整（D6 前置：`task.md` 已
 
 ## Selected Design
 
-依据 Owner D1—D6（2026-10-20）。
+依据 Owner D1—D7（2026-10-20）。
 
 ### 1. 模块边界
 
 新增 L2 包 `builtin/`（不进入 `tool/` 目录）。依赖只允许：标准库 + `<module>/core` + `<module>/tool` + `<module>/session`；不得 import `llm` / `contextmgr` / `runlog` 及任何上层包。
 
-### 2. Todo 写入路径（D1；接口归属待 D7 裁决）
-
-**以下为 Owner D1 的方法集，若 D7 采纳 C1 推荐方案，则本段整体迁到 `session` 包（`type TodoOperations` 同方法集，哨兵改 `session.ErrTodoNotFound`），`builtin` 只引用不定义。**
+### 2. Todo 写入路径（D1 / D7②：端口归 `builtin`）
 
 ```go
-// package builtin（D7 裁决后可能改为 package session）
+// package builtin
 type TodoOperations interface {
 	Create(ctx context.Context, sessionID, title string) (session.Todo, error)
 	List(ctx context.Context, sessionID string) ([]session.Todo, error)
@@ -71,12 +70,13 @@ type TodoOperations interface {
 var ErrTodoNotFound = errors.New("builtin: 该会话下不存在该待办")
 ```
 
-- **T03 负责**：五个工具的实现；接口定义按 D1 归 T03，但 T04 已 APPROVED 的 Contract 声明 `session.TodoOperations` 为权威并要求 T03 采用 → 存在冲突，等待 D7 裁决（见 `Coordination` C1）。
-- **T03 不提供**任何生产存储实现（无 `MemoryTodoStore`、无 `session.Store` 实现、无文件/DB/Redis）。真实 Todo 数据与生命周期由 T04 Session Manager 拥有与实现。
-- 端口由装配层（T07）在 Turn 内注入到 `todo_*` 工具构造函数（不得注入 `*Manager`，否则重入死锁）；工具每次调用都显式传 `req.SessionID`。
+- **T03 负责**：五个工具的实现与 `builtin.TodoOperations` / `builtin.ErrTodoNotFound` 的定义（D7②）。
+- **T04 不受影响**：`session.TodoOperations`（`Todos` / `PutTodo` / `DeleteTodo`）保持其已批准形态，本轮不做 Revision；本任务不 import 该类型的实现。
+- **T03 不提供**任何生产存储实现（无 `MemoryTodoStore`、无 `session.Store` 实现、无文件/DB/Redis）。真实 Todo 数据与生命周期由 T04 Session Manager 拥有与实现；工具不生成 ID、不做状态迁移。
+- **T07 承担适配**（D7② 第 4 条）：`builtin.TodoOperations` 的具体实现（含 Todo ID 生成、状态迁移、`ErrTodoNotFound` 映射）必须在 T07 Task 中显式归属并带验收标准，不得隐式遗漏；T07 只允许在 Turn 内注入能力接口，不得注入 `*Manager`（重入死锁）。
 - **会话身份唯一来源**：`tool.Request.SessionID`（可信、由运行时注入）。工具从不由 `Arguments` 读取会话；参数 schema 不含任何 session 字段，且 `Arguments` 中出现 `session_id` / `sessionId` / `session` 键一律 `invalid_arguments`（显式拒绝而非静默忽略）。
-- 二者均**不得修改 T00 已冻结接口**（`core/**`、`tool/tool.go`、`session/session.go`；T04 已按 Revision 流程经 Owner 授权修改 `session/session.go`，本任务不改）。
-- T04 的 Task / Contract 与本安排的冲突**已发生**，按 Owner D1 要求先报告（`Coordination` C1），未单方面修改。
+- 两者均**不得修改 T00 已冻结接口**（`core/**`、`tool/tool.go`、`session/session.go`；T04 已按其 Revision 流程经 Owner 授权修改 `session/session.go`，本任务不改）。
+- 冲突处理结论见 `Coordination` C1（已按 Owner D7 关闭）。
 
 ### 3. 工具协议（D2 / D3 / D4）
 
@@ -143,7 +143,7 @@ type TodoOperations interface { /* Create / List / Complete，见 Selected Desig
 var ErrTodoNotFound = errors.New("builtin: 该会话下不存在该待办")
 ```
 
-具体工具类型不导出，只经构造函数暴露 `tool.Tool`。**端口与哨兵的最终归属待 D7 裁决**：若保留在本包，`session` 实现方无法反向 import（L1→L2 违规），只能由 T07 适配器实现，而 ID 生成与状态迁移将落到装配层；若按 C1 推荐迁到 `session`，则 `builtin` → `session` 单向依赖，无违规。D7 裁决后本节随之定稿。
+具体工具类型不导出，只经构造函数暴露 `tool.Tool`。**端口与哨兵按 D7② 留在本包**：`session`（L1）不得 import `builtin`（L2），因此实现只能由 T07 适配器提供；Todo ID 生成与状态迁移归 T07 Task 显式承担（见 `Coordination` C3 / C4）。
 
 ### 模型可见协议
 
@@ -207,7 +207,7 @@ var ErrTodoNotFound = errors.New("builtin: 该会话下不存在该待办")
 
 ## Coordination（Owner 要求报告，不单方面修改）
 
-### C1（D7，阻塞）：T04 已 APPROVED 的 `session.TodoOperations` 与 Owner D1 的方法集冲突
+### C1（D7，已按方案②关闭）：T04 已 APPROVED 的 `session.TodoOperations` 与 Owner D1 的方法集冲突
 
 证据（`origin/feat/agent-session-manager-v1`，Contract `APPROVED`，Design 已更新）：
 
@@ -226,23 +226,23 @@ type TodoOperations interface {
 2. **接口归属**：Owner D1 写「T03 负责…及接口定义」；T04 Contract 写「只能由本 Contract 定义 T04 的权威接口并要求 T03 采用」。两处不能同时成立。
 3. **分层**：若保留 `builtin.TodoOperations` 并由 `session` 实现，`session`（L1）必须 import `builtin`（L2），违反 Design §2 分层；唯一避免方式是把实现放在装配层（T07），但 ID 生成与状态迁移属 Todo 生命周期，不应落在装配层。
 
-推荐（需 Owner 裁决，不自作决定）：**端口归 `session`，方法集按 Owner D1 扩展为 `Create` / `List` / `Complete`**，即 T04 走一次 Contract Revision：`*Turn` 上新增 `Create(ctx, title) (Todo, error)`（由 T04 生成 ID）、`List() []Todo`、`Complete(id) (Todo, error)`（幂等；不存在返回 `session.ErrTodoNotFound`）。T03 随后把工具构造函数参数类型改为 `session.TodoOperations`，删除 `builtin.TodoOperations` 与 `builtin.ErrTodoNotFound`。这样同时满足 D1 的方法集、D1 的「T04 拥有生命周期」、Design §2 分层（`builtin` → `session` 单向），且不产生两套 Todo 端口。
+**Owner 裁决（D7，2026-10-20）：方案②。** T03 保留 `builtin.TodoOperations` + `builtin.ErrTodoNotFound`，用测试专用 Fake 独立开发与测试，不提供生产 Todo 存储；T04 保持其 `session.TodoOperations` 并继续独立推进，本轮不做 Revision；两个分支各自 Design 留在本分支，集成时解决冲突；接口适配（含 Todo ID 生成、状态迁移、错误映射）在 T07 Task 中显式归属并验收（见 C4）。后果：`builtin` 与 `session` 之间无 import 关系，`session` 不反向依赖 `builtin`，分层未被破坏；代价是 T07 必须写一层适配，真实 Todo 端到端行为只能到集成阶段验证。
 
-备选（不推荐）：T03 保留 `builtin.TodoOperations`，T07 写适配器包装 `*Turn` 并自行生成 ID 与状态迁移。可满足 D1 字面，但把 Todo 生命周期移出 T04，与 D1「生命周期由 T04 管理」矛盾，且增加一层无收益适配。
+### C2（已按 Owner 同意关闭）：Design 不变量编号已被 T02 / T04 占用且互相重叠
 
-若 Owner 裁决采纳推荐方案，本 Contract 的 `Interfaces and Data` 需同步替换：`TodoOperations` 归属 `session`、删除 `ErrTodoNotFound`（改用 `session.ErrTodoNotFound`）、`TodoStatus` 改用 T04 已导出的 `session.TodoStatusPending` / `session.TodoStatusCompleted`（当前分支基线尚无这些符号，需 T04 合并后才能编译，属集成顺序问题）。
+T02 在 §11 新增 `INV-009`—`INV-013`，T04 新增 `INV-009`—`INV-016`（两条分支独立编号，已互相重叠）。Owner 已同意 T03 使用 `INV-B01`—`INV-B09` 作为任务局部编号，不占用全局不变量编号。本分支在 §11 下新增独立小节「内置工具不变量（`builtin-agent-tools-v1`）」，全局重编号留待 Owner 集成时统一处理。
 
-### C2（需 Owner 决定）：Design 不变量编号已被 T02 / T04 占用且互相重叠
+### C3（T04 / T07 装配衔接，D7 后确定）
 
-T02 在 §11 新增 `INV-009`—`INV-013`，T04 新增 `INV-009`—`INV-016`（两条分支独立编号，已互相重叠）。本任务不能再用 `INV-009` 起的新号。建议：T03 在 §11 下新增独立小节「11.x 内置工具不变量（`builtin-agent-tools-v1`）」，用任务内编号 `INV-B01`—`INV-B09` 引用 Contract，全局重编号留待 Owner 集成时统一处理。
+T04 Contract 的「访问路径」要求 Turn 内组件只能通过注入的 `session.TodoOperations` / `*Turn` 访问，且禁止注入 `*Manager`（重入死锁）。本任务「构造函数注入端口、工具不做读改写」与此一致。T07 必须在 Turn 内注入能力接口，不得注入 `*Manager`。
 
-### C3（T04 / T07 装配衔接）
+### C4（T07 必须显式承担的适配责任，D7② 第 4 条）
 
-T04 Contract 的「访问路径」要求 Turn 内组件只能通过注入的 `session.TodoOperations` / `*Turn` 访问，且禁止注入 `*Manager`（重入死锁）。这与本任务「构造函数注入端口、工具不做读改写」一致；无论 D7 如何裁决，T07 都必须在 Turn 内注入能力接口，不得注入 `*Manager`。
+T07 需在自身 Task 中写入并验收：① 用 `session.TodoOperations` / `*Turn` 实现 `builtin.TodoOperations`；② Todo ID 生成规则（工具不生成 ID）；③ `pending → completed` 状态迁移与幂等完成；④ 把 T04 的「不存在」语义映射为 `builtin.ErrTodoNotFound`；⑤ 不得把 `*Manager` 注入 Turn 内组件。以上任何一项缺失都视为集成缺陷，不得隐式省略。
 
 ## Design Sync Plan（D7 裁决 + `APPROVED` 后由 Analyst 执行，先于 Coder）
 
-以 `origin/develop` 当前内容为基线增量写入（不覆盖 T02 / T04 已落条文）：
+已执行（本分支 `docs/design/runtime-architecture.md`，以本分支 `origin/develop` 基线增量写入；T02 / T04 的 Design 条文留在各自分支，集成时合并）：
 
 1. §2：新增 `L2 builtin`（依赖 `core` / `tool` / `session`），原「L2（未实现）Agent Loop / 装配层」改为 `L3`；补「L1 不得反向依赖 L2」。
 2. §3：新增 `builtin` 模块行（五个内置工具 + Mock 数据集；不负责 Registry / 调度 / 持久化 / Todo 生命周期）。此表与 T04 已改的 `session` 行相邻，仅追加一行。
@@ -270,16 +270,16 @@ T04 Contract 的「访问路径」要求 Turn 内组件只能通过注入的 `se
 ## Open Risks
 
 - **证据边界易被夸大**：无生产存储意味着「会话隔离」在 T03 只有 Fake 证据；若 Cleaner / OwnerGate 不严格区分，会把 Fake 当运行期证据。已写入 INV-B06 / Design Sync Plan / Verification 注释要求。
-- **D7 未裁决前无法定稿**：`TodoOperations` 归属与方法集决定公共符号与文件清单；若 Owner 采纳 C1 推荐方案，本 Contract 的 `Interfaces and Data` 与 Fake 签名都要改，且需 T04 先走 Revision。
-- **集成顺序耦合**：若改用 `session.TodoOperations`，`builtin` 将依赖 T04 合并后的 `session` 符号（`TodoStatus` 常量、`ErrTodoNotFound`），本分支在 T04 合并前无法编译——需 Owner 决定 merge 顺序或允许跨分支依赖（当前禁止）。
-- **Design 章节并发修改**：T03 / T04 都改 §3 / §8 / §11 / §12/§14，且 T02 已改 §7 / §11 / §12 / §14；merge 顺序、章节归属与不变量编号（C2）需 Owner 决定。
+- **集成期适配风险（D7② 的代价）**：`builtin.TodoOperations` 与 `session.TodoOperations` 是两套端口；T07 必须显式承担适配、ID 生成、状态迁移与错误映射，任一项遗漏都会导致 Todo 工具在真实装配中不可用或产生双事实来源。
+- **集成顺序耦合**：本分支不依赖 T04 的 `session` 新符号，可独立编译与测试；但 Todo 的真实端到端行为只有在 T07 装配后才会被验证，单模块阶段不得声明已验证。
+- **Design 章节并发修改**：T03 / T04 都改 §3 / §8 / §11 / §12/§14，且 T02 已改 §7 / §11 / §12 / §14；本分支只写自身条文，merge 冲突与全局不变量编号（C2 已同意用 `INV-B*`）在集成时处理。
 - **`float64` 精度**：`0.1+0.2 != 0.3`，模型可能意外；协议已固定，若要求十进制精确算术需 Revision。
 - **`empty_query` / `empty_title` / 会话字段拒绝** 属主动收紧（Task 未逐条要求），Owner 已批准 D4 空查询为参数错误；`empty_title` 与会话字段拒绝是 Analyst 判定，Cleaner 按 Contract 审查。
 - **`ctx` 语义**：T03 只固定工具层最小响应，Loop 侧如何消费归 Agent Loop 任务，运行期证据缺失。
 
 ## Owner Decision Record
 
-决定时间：2026-10-20。来源：Owner 明确「T03 设计方案有条件批准」。适用范围：`builtin-agent-tools-v1`（T03）及其与 T02 / T04 / T07 的衔接约束。**本次仅批准设计方向**，不构成 Contract `APPROVED`，也不授权启动 Coder。
+决定时间：2026-10-20。来源：Owner 明确「T03 设计方案有条件批准」，随后就 D7 / C2 作出最终裁决。适用范围：`builtin-agent-tools-v1`（T03）及其与 T02 / T04 / T07 的衔接约束。D1—D7 全部裁决后，本 Contract 由 Analyst 机械持久化为 `APPROVED`（A1 / A2 两段式），并据此更新 Design、启动 Coder。
 
 1. **D1（Todo 写入路径）**：采用 `TodoOperations` 受限接口注入，含 `Create` / `List` / `Complete`。
    - T03 负责五个工具的实现及接口定义。
@@ -295,6 +295,13 @@ T04 Contract 的「访问路径」要求 Turn 内组件只能通过注入的 `se
 5. **D5（完成语义）**：重复完成同一个已完成 Todo 返回幂等成功；不存在的 Todo ID 返回领域错误。
 6. **D6（Design 与流程）**：批准 Design Impact 调整为 `UPDATE`；但 Task 内部的 Design Impact 冲突必须**先由有权限的 TaskBuilder 规范化 `task.md`**，再由 Analyst 更新 Contract 与长期 Design，并按 V3 完成正式批准与证据绑定。在 Task / Contract / Design 一致性完成前**不得启动 Coder**。保持现有 feature 分支与已提交证据，不重建分支；不得扩大到 Agent Loop，不得调用真实付费 LLM API。
 
-兼容性核对（对规范化后的 `task.md` @ `a2c92d6` 复核）：D2—D6 与 `task.md` 的 Goal / Scope / AC-001—AC-009 全部兼容；AC-006 已按 Owner D1 收窄为工具层证据，AC-009 已覆盖 D3 的分级要求；D1 的方法集（`Create` / `List` / `Complete`）与 `task.md` Scope 第 16 条一致。**唯一未决的是 D1 的接口归属**（T03 定义 vs T04 已 APPROVED 的 `session.TodoOperations`），即 D7。
+兼容性核对（对规范化后的 `task.md` @ `a2c92d6` 复核）：D2—D6 与 `task.md` 的 Goal / Scope / AC-001—AC-009 全部兼容；AC-006 已按 Owner D1 收窄为工具层证据，AC-009 已覆盖 D3 的分级要求；D1 的方法集（`Create` / `List` / `Complete`）与 `task.md` Scope 第 16 条一致。D7 裁决后与 Task 无新增冲突。
 
-7. **D7（待 Owner 裁决，新增于 2026-10-20）**：见 `Coordination` C1。选项：① 端口归 `session`、方法集按 D1 扩为 `Create` / `List` / `Complete`（需 T04 Contract Revision）；② 保留 `builtin.TodoOperations`，由 T07 适配器实现（ID 生成与状态迁移落到装配层）。Analyst 推荐 ①，理由：同时满足 D1 方法集、D1「T04 拥有生命周期」与 Design §2 分层；② 与「生命周期归 T04」矛盾。
+7. **D7（2026-10-20 最终裁决：方案②）**：保持 T03 / T04 并行开发。
+   - T03 保留 `builtin.TodoOperations`（`Create` / `List` / `Complete`）+ `builtin.ErrTodoNotFound`，用测试专用 Fake 独立开发与测试，不提供生产 Todo 存储。
+   - T04 继续使用已批准的 `session.TodoOperations`，不等 T03，本轮不做 T04 Contract Revision。
+   - 两分支各自独立开发、测试、审查；Design 更新各留本分支，集成时检查并解决冲突。
+   - T07 负责接口适配与组件装配；Todo ID 生成、状态迁移与错误映射必须在 T07 Task 中明确归属和验收标准，不得隐式遗漏（见 `Coordination` C4）。
+   - 同意 `INV-B01`—`INV-B09` 作为 T03 局部不变量编号，不占用全局编号。
+   - T03 Analyst 按本决定完成 Contract 与 Design 正式批准流程后允许 Coder 开发；不得因 T04 未完成而阻塞 T03。
+   - 真实会话隔离、跨模块调用与 Todo 端到端行为留待后续集成验收，单模块阶段不得声称已验证。
