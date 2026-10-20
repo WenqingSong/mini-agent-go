@@ -52,7 +52,7 @@ go list -f '{{.ImportPath}} {{join .Imports " "}}' ./...
 | `session` | Session / Todo / 摘要数据类型、`Store` 抽象，以及单进程内存 Session Manager（会话生命周期、Turn 执行权与原子提交、过期清理、Todo 生命周期） | 持久化实现、跨进程锁与多副本一致性、摘要生成算法、Agent Loop 调度 |
 | `builtin` | 五个内置工具（`calculator`、`mock_search`、`todo_create`、`todo_list`、`todo_complete`）、固定有序 Mock 数据集、`TodoOperations` 写入端口与领域错误码 | `tool.Registry` 实现、工具调度与失败回填、Todo 存储 / ID 生成 / 生命周期、网络与第三方 SDK |
 | `contextmgr` | 上下文预算、窗口选择与压缩：在估算预算内构建可送 Provider 的合法消息视图 | 生产 Summarizer（LLM 摘要适配器）、真实 tokenizer、摘要跨 Run 持久化 |
-| `runlog` | 运行事件模型与 `Sink` 接口 | 落盘格式、采样、上报后端 |
+| `runlog` | 运行事件模型、`Sink` 接口与结构化 JSON 记录（字段语义、脱敏与上限） | 文件落盘/滚动策略、采样、上报后端 |
 
 ## 4. 数据模型
 
@@ -155,9 +155,13 @@ RUNNING ──► COMPLETED        （模型不再要求工具调用）
 
 ## 10. 运行日志（runlog）
 
-- 日志是**观察者**：`Sink.Record` 返回错误不得改变 Run 状态、计数或消息序列（旁路原则）。
-- 事件以 run 为单位组织（`ExecutionRef`），携带 step、CallID 与已脱敏的结构化载荷；具体落盘格式、采样、上报属后续任务。
-- 运行日志不是会话事实来源：消息历史归 Session，运行结论归 `RunResult`。
+- 日志是**观察者**：`Sink.Record` 返回错误不得改变 Run 状态、计数或消息序列（旁路原则）。写入失败、Handler 返回错误或 panic、`ctx` 已取消、载荷异常时不得 panic，也不得修改传入的 `Event` 与 `Data`。
+- 事件以 run 为单位组织（`ExecutionRef` + step + `CallID` + 已脱敏 `Data`）。耗时与终态由发出端随事件传入：`Event.Duration` 由发出端测量，输出为毫秒（`duration_ms`）；`Event.Status` 只允许 `run_finished` 等适用事件携带，Sink 不合成终态——工具调用成功不代表整个 Run 完成。
+- 记录形态：每条事件 = 一行 `log/slog` JSON（`msg=run_event`、`level=INFO`），字段固定为 `session_id`、`run_id`、`event`、`step`、`call_id`、`duration_ms`、`status`、`error_kind`、`op`、`error_message`、`summary`、`data`（不适用时省略；`call_id` 取事件自带的 `Event.CallID`，为空且 `Error != nil` 时回退 `Error.CallID`，Sink 不从 `Data` 或名称推断调用身份）；`status` 空且无错误时为 `RUNNING`，有错误时由 `core.StatusOf` 推导；`error_kind` 取 `core.KindOf`，因此 `cancelled` 与 `deadline_exceeded` 是两个不同取值。`Error.Cause`、堆栈与原始错误对象不进入日志。
+- 脱敏边界（Sink 侧防御性脱敏，发出端仍必须先脱敏）：`Data` 键名归一化（小写，去 `_`、`-`、`.`、空格）后按固定优先级判定——① 允许清单原样输出值：`model`、`provider`、`finish_reason`、`stop_reason`、`name`、`tool`、`tool_name`、`is_error`、`ok`、`status`、`attempt`、`max_attempts`、`retry_count`、`usage`、`input_tokens`、`output_tokens`、`total_tokens`、`cached_tokens`、`compacted`、`dropped_messages`、`message_count`、`tool_call_count`、`id`、`index`、`truncated`；② 敏感键替换为 `[REDACTED]`（`apikey`/`secret`/`token`/`password`/`credential`/`privatekey` 等片段，或 `authorization`/`auth`/`cookie` 等键，含大小写与命名变体）；③ 正文键输出 `[REDACTED:len=N]`：`content`、`text`、`messages`、`prompt`、`input`、`raw`、`body`；④ 未知键整键省略。字符串值命中 `Bearer`/`Basic` 凭据模式时整体替换为 `[REDACTED]`。允许清单是封闭集合，新增业务字段必须同步本节。
+- 上限执行：深度 > 8、或节点预算 1024 耗尽（按对象键字典序遍历，超出部分替换为 `[TRUNCATED]`）；单字符串 > 256 字节截断至 256 字节（UTF-8 边界）并追加 `…`；`Data` 原始字节 > 64 KiB 或非法 JSON/顶层非对象时不输出 `data`，只置 `data_truncated` / `data_invalid`。
+- 并发：每条记录必须是可独立解析的完整单行且不交织；由单一 `slog.Handler` 实例保证（标准库 `JSONHandler` 以共享 mutex 串行写），Sink 自身无可变状态。
+- 运行日志不是会话事实来源：消息历史归 Session，运行结论归 `RunResult`。本节固定 JSON 记录格式与字段语义；文件落盘位置、滚动/轮转、采样、异步批量上报与日志检索仍属后续任务。
 
 ## 11. 不变量
 
@@ -262,8 +266,12 @@ RUNNING ──► COMPLETED        （模型不再要求工具调用）
 | `contextmgr/manager.go` | contextmgr | NewManager 与构建/压缩逻辑 |
 | `contextmgr/estimator_test.go` | contextmgr | `Estimator` / `HeuristicEstimator` 边界 |
 | `contextmgr/manager_test.go` | contextmgr | `Build` 的预算、保留、原子单元与失败语义 |
-| `runlog/runlog.go` | runlog | EventKind / Event / Sink / Discard |
+| `runlog/runlog.go` | runlog | EventKind（含六个常量）/ Event（含 `Duration`、`Status`）/ Sink / Discard |
+| `runlog/slog.go` | runlog | `NewSlogSink` / `NewJSONSink`、记录构建、panic 恢复与错误返回 |
+| `runlog/sanitize.go` | runlog | 允许清单、敏感/正文/未知键规则、深度与节点上限、键序稳定遍历 |
 | `runlog/runlog_test.go` | runlog | `Discard` 无副作用 |
+| `runlog/slog_test.go` | runlog | 字段与关联性、失败与超时定位、旁路与异常隔离、并发记录 |
+| `runlog/sanitize_test.go` | runlog | 脱敏表驱动：嵌套、未知键、超大输入、泄漏扫描 |
 
 规则：
 
@@ -288,6 +296,7 @@ RUNNING ──► COMPLETED        （模型不再要求工具调用）
 - INV-B05 / INV-B06 的真实会话隔离、跨会话不可写、Todo 生命周期与持久化并发：`builtin` 只有测试专用 Fake 证据，运行期证据归 Agent Loop 集成与装配层。
 - Todo 端到端行为（模型发起 `todo_*` 调用到真实 Todo 落库）：需要 T07 把 `session.TodoOperations` 适配成 `builtin.TodoOperations` 后才可验证。
 - `HeuristicEstimator` 与真实模型 token 数的偏差幅度未验证（按 4 字符/token 估算，对 CJK 偏低）；`TokenBudget` 已固定为估算预算，精确校准依赖真实 tokenizer 评估（T07）。
+- 日志记录在真实 Agent Loop 中产生是否完整、调用方是否真正隔离日志错误，尚未验证；本仓库目前只有 Sink 层的进程内证据。
 - `-race` 与 `go test -race` 未进入 CI（`.cnb.yml` 只有 `make test`），会话并发不变量依赖本地/审查时人工执行。
 - `session` 内存实现无持久化，进程重启数据丢失是既定行为，不做恢复验证。
 
@@ -297,7 +306,7 @@ RUNNING ──► COMPLETED        （模型不再要求工具调用）
 | --- | --- |
 | 取消/超时在 Loop 中的实际中断点与消息保留策略 | Agent Loop 任务 |
 | 跨 step 的 `RunStatus` 终态映射、是否继续/重试决策、同 step 多调用顺序与并发 | Agent Loop 任务 |
-| runlog 旁路在真实运行时成立、事件完整性 | Agent Loop 任务 |
+| 真实运行期事件完整性、日志旁路在 Agent Loop 中成立（发出点接线与调用方隔离日志错误） | Agent Loop 任务 |
 | `session.Store` 的持久化实现（DB / Redis）、重启恢复与数据迁移 | Session 持久化任务 |
 | `builtin.TodoOperations` 的适配实现、Todo ID 生成、状态迁移、`ErrTodoNotFound` 映射 | 装配层任务（T07） |
 | `session.TodoOperations` 与 `builtin.TodoOperations` 两套端口的集成、真实会话隔离与 Todo 端到端验收 | 装配层 + 集成验收 |
@@ -306,6 +315,8 @@ RUNNING ──► COMPLETED        （模型不再要求工具调用）
 | Provider 重试、限流、streaming、鉴权 | Provider 任务 |
 
 归属收窄（2026-10-20，`tool-registry-executor-v1`）：单工具级失败分类（工具级超时、工具 `error`、参数校验失败、未知工具、panic）、参数校验、Registry 生命周期与同一 Run 内重复 Call ID 去重已落入 §7 / §11，不再属于 Agent Loop 任务；Agent Loop 只承担跨 step 的 `RunStatus` 终态映射、是否继续/重试决策与同 step 多调用顺序并发。
+
+归属收窄（2026-10-20，`runtime-observability-v1`）：Sink 层旁路（写入失败、Handler 异常、`ctx` 取消、异常载荷）与记录完整性（单行 JSON、并发不交织、字段语义与脱敏）已落入 §10，不再属于 Agent Loop 任务；Agent Loop 仅承担发出点接线、事件完整性以及调用方隔离日志错误。
 
 ## 15. 演进规则
 
