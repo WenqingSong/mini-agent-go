@@ -12,7 +12,8 @@ review:
   target: "05a49e8c23b86190f63571c3485176d8db6bc718"
 
 owner:
-  status: PENDING
+  status: ACCEPTED
+  review_target: "05a49e8c23b86190f63571c3485176d8db6bc718"
 
 delivery:
   status: NOT_RUN
