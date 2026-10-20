@@ -251,8 +251,8 @@ func contentText(parts []core.ContentPart) string {
 
 // parseChatResponse 把 Chat Completions 响应体解析为契约响应。
 //
-// 只要有一个字段无法无歧义地映射为契约语义（缺 choices、非法 JSON、未知终止原因、
-// 工具调用缺 ID/函数名、arguments 非法 JSON），就整体失败为 provider_failure，
+// 只要有一个字段无法无歧义地映射为契约语义（缺 choices、message 缺失或为 null、
+// 非法 JSON、未知终止原因、工具调用缺 ID/函数名、arguments 非法 JSON），就整体失败为 provider_failure，
 // 不返回半成品 Response；成功返回前强制走 Response.Validate。
 func parseChatResponse(body []byte) (llm.Response, error) {
 	var payload chatResponse
@@ -267,9 +267,14 @@ func parseChatResponse(body []byte) (llm.Response, error) {
 	if len(choice.Message) == 0 {
 		return llm.Response{}, protocolError("响应 choices[0] 缺少 message", nil)
 	}
-	var message chatRespMessage
+	// 用指针解码：JSON null 解成 nil，与"message 对象存在"区分开。
+	// 直接解到结构体时 null 会静默得到零值，把异常载荷当成空的 assistant 成功响应。
+	var message *chatRespMessage
 	if err := json.Unmarshal(choice.Message, &message); err != nil {
 		return llm.Response{}, protocolError("响应 choices[0].message 不是合法 JSON 对象", err)
+	}
+	if message == nil {
+		return llm.Response{}, protocolError("响应 choices[0].message 为 null", nil)
 	}
 
 	finishReason, err := mapFinishReason(choice.FinishReason)

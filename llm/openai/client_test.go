@@ -405,6 +405,7 @@ func TestCompleteResponseParsing(t *testing.T) {
 			wantFinish: llm.FinishReason("stop"),
 		},
 		{
+			// CLEAN-002 兼容用例：message 对象存在、content 为 null 且带有效 tool_calls 仍须解析成功。
 			name:          "单个 Tool Call（content 为 null）",
 			body:          `{"id":"chatcmpl-3","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"echo","arguments":"{\"text\":\"hi\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":5,"completion_tokens":9}}`,
 			wantFinish:    llm.FinishReason("tool_calls"),
@@ -565,6 +566,21 @@ func TestCompleteErrorSemantics(t *testing.T) {
 			name:         "choices 缺少 message",
 			status:       http.StatusOK,
 			body:         `{"id":"chatcmpl-x","choices":[{"finish_reason":"stop"}]}`,
+			wantKind:     core.KindProviderFailure,
+			wantContains: "message",
+		},
+		{
+			// 回归 CLEAN-002：message 为 null 时不得被解码成零值结构体后当作成功响应。
+			name:         "choices 的 message 为 null",
+			status:       http.StatusOK,
+			body:         `{"id":"chatcmpl-x","choices":[{"message":null,"finish_reason":"stop"}]}`,
+			wantKind:     core.KindProviderFailure,
+			wantContains: "message",
+		},
+		{
+			name:         "choices 的 message 不是对象",
+			status:       http.StatusOK,
+			body:         `{"id":"chatcmpl-x","choices":[{"message":"oops","finish_reason":"stop"}]}`,
 			wantKind:     core.KindProviderFailure,
 			wantContains: "message",
 		},
