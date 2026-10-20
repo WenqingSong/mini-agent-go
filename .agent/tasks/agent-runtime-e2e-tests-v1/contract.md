@@ -5,7 +5,7 @@ Design Impact: UPDATE（`docs/design/runtime-architecture.md` §12 路径登记 
 
 ## Decision Status
 
-WAITING_FOR_OWNER_DECISION
+APPROVED（Owner 2026-10-21 批准 D1–D4；Evidence Commit A1 见 `state.yaml` 的 `contract.target`）
 
 ## Problem
 
@@ -95,7 +95,14 @@ e2e/offline_test.go      AC-005 零真实 Token 机械证据
 
 ## Selected Design
 
-等待 Owner 确认。
+Owner 2026-10-21 全量采纳 Analyst 推荐 R1–R4（未提出修改）。落地要点：
+
+- **范围（D1 / 方案 B）**：按现有 v1 装配实现端到端验收，不修改 Task 与 AC，不把 T08 能力并入本任务。验收对象 = 真实 `openai.Client` + loopback 脚本服务 + HTTP 请求 + Agent Loop + 真实 `builtin` 工具执行 + Run 终态 + Session 原子提交 + `runlog` 事件。明确排除：真实外部 LLM 调用与真实 Token 消耗、Todo 工具端到端验收、生产级上下文压缩的新增实现。缺失能力必须如实记录，**不得用测试替身伪装成已具备生产能力**。
+- **套件位置（D2）**：新增根级 `e2e/`，仅包含测试文件，不新增生产 Go 符号；仓库级门禁为 `go test ./...` / `go vet ./...` / `go build ./...`；`go build ./e2e` 单包因目录只有测试文件而失败属预期行为，不作为仓库构建失败；同步登记 Design §12 的目录与所有权；不把系统级验收逻辑塞进 `httpapi` 私有测试包。
+- **错误语义（D3）**：采用 §Failure and Consistency Semantics 的七行三元组矩阵，每行绑定真实触发条件与代码路径；三类失败（Provider 失败 / 请求超时 / 客户端取消）必须可区分，不得混为一类。
+- **Session 预置数据（D4）**：允许用 `session.Manager.Save` 预置非空 `Todos` / `Summary`，以验证「原有状态保留、更新与失败回滚」，避免空 Session 的平凡断言。边界：预置数据仅用于测试，**不代表 HTTP v1 已开放 Todo 工具**；断言必须比较实际最终状态，不能只看请求成功或响应字段非空；失败、取消、超时不得留下半轮提交或破坏预置状态。
+- **观测方式（R4）**：`recordingRunner` 只读透传 + 真实 `runlog` 事件交叉校验终态；不引入 Clock 注入、不新增生产符号。
+- **执行顺序**：Contract A1/A2 两段式提交 → Design §12/§14 更新 → TaskBuilder 核实并解除 `blocked.active` → `coder-start` Gate 实际 PASS → HANDOFF Coder。
 
 ## Interfaces and Data
 
@@ -138,15 +145,18 @@ scriptedServer = httptest.NewServer(script handler) ← 唯一模型交互点
 
 失败矩阵（v1 装配，均要求 INV-E2E-02 成立）：
 
-| 用例 | 注入方式 | HTTP | `error.code` | Run 终态 | `error_kind` |
-| --- | --- | --- | --- | --- | --- |
-| provider 4xx | 脚本返回 400 | 502 | `provider_failure` | `FAILED` | `provider_failure` |
-| provider 5xx | 脚本返回 500 | 502 | `provider_failure` | `FAILED` | `provider_failure` |
-| provider 无响应 | 脚本阻塞 + `openai.Config.Timeout` 到期 | 502 | `provider_failure` | `FAILED` | `provider_failure`（`agent` 重分类） |
-| HTTP 请求超时 | 脚本阻塞 + `httpapi.RequestTimeout` 到期 | 504 | `deadline_exceeded` | `CANCELLED` | `deadline_exceeded` |
-| 客户端断开 | 客户端取消请求 ctx | 不承诺（录制到 408 仅作观察项） | `cancelled`（若可写出） | `CANCELLED` | `cancelled` |
-| `MaxLLMCalls` 耗尽 | 脚本持续返回 `tool_calls`，上限取小值 | 429 | `llm_call_limit` | `LIMIT_EXCEEDED` | `llm_call_limit` |
-| `MaxToolCalls` 耗尽 | 单响应多 `tool_calls` 超过工具额度 | 429 | `tool_call_limit` | `LIMIT_EXCEEDED` | `tool_call_limit` |
+| 用例 | 注入方式 | HTTP | `error.code` | Run 终态 | `error_kind` | 实际判定路径 |
+| --- | --- | --- | --- | --- | --- | --- |
+| provider 4xx | 脚本返回 400 | 502 | `provider_failure` | `FAILED` | `provider_failure` | `openai/client.go:189-195` → `agent/run.go:230-239` → `httpapi/errors.go:185` |
+| provider 5xx | 脚本返回 500 | 502 | `provider_failure` | `FAILED` | `provider_failure` | 同上 |
+| provider 无响应 | 脚本阻塞 + `openai.Config.Timeout` 到期 | 502 | `provider_failure` | `FAILED` | `provider_failure`（`agent` 重分类，非 `deadline_exceeded`） | `openai/client.go:158-166`（Provider 层为 `deadline_exceeded`）→ `agent/run.go:126` 重分类 → `errors.go:185` |
+| HTTP 请求超时 | 脚本阻塞 + `httpapi.RequestTimeout` 到期 | 504 | `deadline_exceeded` | `CANCELLED` | `deadline_exceeded` | `httpapi/handler.go:118-119` ctx 到期 → `agent/run.go:231-233` → `errors.go:173-183` |
+| 客户端断开 | 客户端取消请求 ctx | 不承诺（录制到 408 仅作观察项） | `cancelled`（若可写出） | `CANCELLED` | `cancelled` | `handler.go:126-129` → `errors.go:176-177` |
+| `MaxLLMCalls` 耗尽 | 脚本持续返回 `tool_calls`，上限取小值 | 429 | `llm_call_limit` | `LIMIT_EXCEEDED` | `llm_call_limit` | `agent/run.go:73-76` → `errors.go:189-190` |
+| `MaxToolCalls` 耗尽 | 单响应多 `tool_calls` 超过工具额度 | 429 | `tool_call_limit` | `LIMIT_EXCEEDED` | `tool_call_limit` | `agent/run.go:163-167` → `errors.go:191-192` |
+
+- 矩阵每行都由代码路径核对得出（VERIFIED），不是按错误名推导；三行 502 对应三种不同注入手段（4xx / 5xx / Provider 侧超时），测试必须分别取证：脚本确实返回了该状态码、或脚本确实观察到请求被中止，不得合并成一个用例。
+- 矩阵之外按既有契约处理、本任务不新增断言的场景（Owner D3 第 4 条）：认证失败（401 `unauthorized`）、请求解析类错误（400 / 413 / 415 / 405 `not_found` 等）、成功（200）——这些是 `httpapi` 端点契约，已有 `httpapi/auth_test.go` / `request_test.go` / `errors_test.go` / `handler_test.go` 覆盖；本套件不重复断言，也不得因此宣称它们「已验证」。
 
 - 可恢复工具失败（AC-003，不改变终态）：`calculator` 除零 / 未知工具名 / 参数非法 → `ToolResult{IsError:true}` 回填，wire 层为 `role=tool` + `tool_call_id` + 内容带 `工具执行失败: ` 前缀；下一次模型请求可见该内容；Run 可继续并 `COMPLETED`（HTTP 200）。
 - 成功语义：`200` 只代表该轮 `COMPLETED` 且会话提交已发生（`docs/design/http-api.md:144`）；不代表日志已落盘、不代表外部持久化。
@@ -181,7 +191,7 @@ mutation 清单（Cleaner 至少执行 2 处可逆 mutation，记录 diff 与失
 
 ## Design Update
 
-`Design Impact = UPDATE`，Contract APPROVED 后、Coder 实现前由 Analyst 写入（仅这两处）：
+`Design Impact = UPDATE`，Contract APPROVED 后、Coder 实现前由 Analyst 写入（仅这两处；实际落库为 A2 之后的独立 Design commit）：
 
 1. §12 增补 6 行（`e2e/harness_test.go`、`e2e/chat_test.go`、`e2e/failure_test.go`、`e2e/timeout_test.go`、`e2e/concurrency_test.go`、`e2e/offline_test.go`），归属「集成验收（仅测试）」；并在 §12 规则处补一句边界：`e2e/` 是仅测试包（`package e2e_test`，全部 `*_test.go`），不参与 §2 生产分层（`go list .Imports` 为空、`go build ./...` 跳过；`go build ./e2e` 单包报 `no non-test Go files` 属预期），禁止放入生产代码或导出符号。
 2. §14 追加一条缺口：HTTP 层触发 `todo_*` 与上下文压缩在 v1 装配下不可达（`service.Config` 拒绝 `TokenBudget != 0`、v1 registry 不注册 Todo 工具），本任务只以 seeded Session 快照证明跨会话隔离，Todo 端到端与生产 Summarizer 仍归服务装配任务（T08）。
@@ -192,18 +202,18 @@ mutation 清单（Cleaner 至少执行 2 处可逆 mutation，记录 diff 与失
 
 - Provider 侧超时经 `agent` 重分类为 `provider_failure`（502）而非 504：设计 §7/§14 未显式覆盖该组合。本任务只按实际行为断言并在交付记录标注；**不修改 Design §7**（AC-008 限制）。若 Owner 认为需要把该语义写入长期设计，应以独立任务处理。
 - e2e 装配的 registry（`calculator` + `mock_search`）与 `cmd/mini-agent` 的生产 registry（仅 `calculator`）不同，证据强度只覆盖「Runtime 能力」，不得宣称为生产配置等价。
-- AC-002 若不预置非空 `Todos` / `Summary`，隔离断言在 v1 是空断言，会构成「弱测试」并被 AC-007 判为不合格。
+- AC-002 若不预置非空 `Todos` / `Summary`，隔离断言在 v1 是空断言，会构成「弱测试」并被 AC-007 判为不合格 —— 已由 D4 处置（必须预置）。
 - 时间敏感用例在极端调度延迟下仍可能抖动：缓解措施是最小化 `RequestTimeout`（200ms）、阻塞式脚本服务、有界轮询断言、避免 `Sleep` 时序竞争；残余风险靠 `-count=3` 实测记录。
-- 客户端断开的 HTTP 状态码按设计不承诺，AC-004 的「状态码」维度对该行只能声明为观察项；若 Owner 要求强制断言状态码，需要 Contract Revision（并会与 `docs/design/http-api.md:142` 冲突）。
-- `-race` 全量耗时与内存未测，若影响可接受性，需要 Owner 决定是否只对 `./e2e` 与既有并发包跑 `-race`（本任务默认执行全量并如实记录）。
+- 客户端断开的 HTTP 状态码按设计不承诺 —— 已由 D3 第 3 条确认为观察项；不得为凑「状态码」而阻塞或重试写出响应。
+- `-race` 全量耗时与内存未测（UNKNOWN），执行时如实记录；若不可接受，交 Owner 决定，不在实现期自行缩减。
 
 ## Owner Decision Record
 
-等待 Owner 确认。以下四个问题需要 Owner 明确选择（均附 Analyst 推荐）：
+Owner 决定时间：2026-10-21。本记录由 Analyst 依 Owner 明确指令机械持久化（File Writer ≠ Decision Authority）。
 
-- D1（阻塞项，决定 `blocked.active` 是否可清除）：前置缺口处置 A / B / C → 推荐 **B**（按 v1 装配执行；Todo 与压缩缺口如实标注归 T08），B 不需要修改 Task 与 AC。
-- D2：验收套件落点 → 推荐 **新增根级仅测试包 `e2e/`（6 个文件）+ Design §12 登记**；备选为并入 `httpapi` 测试包（Design 变更更小，但套件归属与解耦变差）。
-- D3：AC-004 失败矩阵三元组确认（上表七行，特别是「provider 无响应 = 502/FAILED」与「HTTP 超时 = 504/CANCELLED」的区分，以及客户端断开不承诺状态码）。
-- D4：AC-002 是否允许用 `session.Manager.Save` 预置非空 `Todos` / `Summary`（仅测试侧、不改生产代码）以消除空断言 → 推荐 **允许**；若不允许，该维度只能记为「v1 下无可验内容」的缺口。
+- **D1 验收范围 → APPROVE 方案 B**：按现有 v1 装配实现端到端验收；不修改 Task 与 AC；不把 T08 能力并入本任务。验收范围包含真实 `openai.Client`、loopback 脚本服务、HTTP 请求、Agent Loop、工具执行、Run 终态、Session 原子提交与 `runlog` 事件；明确排除真实外部 LLM 调用与真实 Token 消耗、Todo 工具端到端验收、生产级上下文压缩的新增实现。缺失能力必须如实记录，不得用测试替身伪装生产能力。
+- **D2 测试套件位置 → APPROVE**：新增根级 `e2e/`，仅测试文件、不新增生产 Go 符号；以 `go test ./...`、`go vet ./...`、`go build ./...` 作为仓库级验证；`go build ./e2e` 单独执行失败属预期，不作为仓库构建失败；更新 `docs/design/runtime-architecture.md` §12 登记测试目录及所有权；不把系统级验收逻辑塞进 `httpapi` 私有测试包。
+- **D3 错误语义矩阵 → APPROVE 四条核心语义**：① Provider 无响应且请求级 ctx 未超时/取消 → 502 + `FAILED`；② 请求级 ctx 到达服务端超时 → 504 + `CANCELLED` + `deadline_exceeded`；③ 客户端断开 → Run 收到取消并记为 `cancelled`，不承诺向已断开客户端返回 HTTP 状态码；④ 成功、工具失败、预算耗尽、认证失败及其他请求错误按当前 HTTP 错误映射契约处理。要求 Contract 完整记录七行矩阵、绑定触发条件与实际映射（不得仅凭错误名推导），测试必须能区分 Provider 失败 / 请求超时 / 客户端取消。
+- **D4 Session 预置数据 → APPROVE**：允许用 `session.Manager.Save` 预置非空 `Todos` / `Summary`，以验证原有状态的保留、更新与失败回滚，避免只验证空 Session 的平凡情况。边界：预置数据仅用于测试，不代表 HTTP v1 已开放 Todo 工具；断言必须比较实际最终状态；失败、取消、超时不得留下半轮提交或破坏预置状态。
 
-补充（不属于决策项，供 Owner 知悉）：`state.yaml` 当前 `blocked.active=true`，`coder-start` Gate 要求其为 `false`；Owner 选定 D1 后需由 TaskBuilder 清除阻塞并保持 `contract.status=PENDING` 直到本 Contract 经 Owner `APPROVED`。
+适用范围与效力：本决定仅覆盖本任务的设计范围，**不代表实现、`CLEAN` 或交付验收已完成**；不改变 `docs/design/http-api.md` 既有错误码映射、`service.Config` 对 `TokenBudget != 0` 的拒绝，也不授权注册 Todo 工具或新增生产符号。`state.yaml` 的 `blocked.active=true` 归 TaskBuilder 管理，Analyst 与 Coder 不得擅自清除；需由 TaskBuilder 核实解除并运行 `coder-start` Gate，Gate 实际 PASS 后才允许 HANDOFF → Coder。
