@@ -1,0 +1,28 @@
+schema_version: 3
+task_id: agent-runtime-loop-v1
+
+contract:
+  status: APPROVED
+  target: 4918efa0ec700aebb583e29b575be4e548cb8f45
+
+resources:
+  reservations: {}
+
+review:
+  status: CLEAN
+  target: e9dd3daaeffb9a7fb7da30ad94270572593bfdd9
+
+owner:
+  status: ACCEPTED
+  review_target: e9dd3daaeffb9a7fb7da30ad94270572593bfdd9
+
+delivery:
+  status: PASS
+  review_target: e9dd3daaeffb9a7fb7da30ad94270572593bfdd9
+  feature_head: a77b5f146ce0a902fba442a9e4c8002c22c6be04
+  develop_base: 635e311fa6414f1fc786f0a3793f49cec8241047
+
+blocked:
+  active: false
+  by: ""
+  reason: ""

@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/json"
+	"fmt"
 	"sync"
 
 	"cnb.cool/framework-station/mini-agent-go/core"
@@ -23,13 +24,15 @@ type TodoOperations interface {
 
 // Turn 是一次 RunTurn 的暂存写入句柄，生命周期与回调一致。
 //
-// 回调内的写入先进入隔离暂存区，只有提交条件全部成立才整体提交；失败、取消、超时、
+// 回调内的写入先进入隔离暂存区（消息追加 Append、已提交历史前缀删除 DropLeading、
+// 摘要 SetSummary、Todo），只有提交条件全部成立才整体提交；失败、取消、超时、
 // panic 都整轮丢弃。暂存区内部加互斥，因此同一 Turn 内多 goroutine 调用安全（每次调用
 // 原子，调用顺序不保证）。回调返回后 Turn 关闭：写方法返回 invalid_argument，
 // 只读方法仍返回安全快照；禁止长期持有 *Turn 供异步回调使用。
 type Turn struct {
 	sessionID string
-	// base 是进入 Turn 时的已提交历史，私有深拷贝，只用于拼装视图与提交前校验。
+	// base 是进入 Turn 时的已提交历史（私有深拷贝），DropLeading 只在此截断前缀；
+	// 它只用于拼装视图与提交前校验。
 	base []core.Message
 
 	mu       sync.Mutex
@@ -51,7 +54,7 @@ func newTurn(base Session) *Turn {
 	}
 }
 
-// Session 返回「已提交基线 + 本 Turn 已暂存写入」的深拷贝视图，供回调内读取。
+// Session 返回「剩余已提交历史 + 本 Turn 已暂存写入」的深拷贝视图，供回调内读取。
 func (t *Turn) Session() Session {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -66,6 +69,48 @@ func (t *Turn) Session() Session {
 		Todos:    cloneTodos(t.todos),
 		Summary:  t.summary,
 	}
+}
+
+// DropLeading 删除「进入本 Turn 时已提交历史」的前 n 条，随 Turn 原子提交。
+//
+// 计数基准：n 是本次调用新删除的条数，作用对象是当前剩余的已提交历史（t.base），
+// 因此同一 Turn 内累计删除量单调不减，一次 DropLeading(2) 再 DropLeading(3) 共删 5 条；
+// 已删除消息不能通过后续调用恢复。本 Turn 经 Append 新增的消息不属于 t.base，
+// 永远不会被删除、移动或重排，最终序列恒为「剩余已提交历史 + 本 Turn 暂存消息」。
+//
+// 合法域：n=0 为空操作，n=len(t.base) 合法（含清空全部已提交历史）；
+// n<0 或 n>len(t.base) 返回 invalid_argument，本次调用原子拒绝。
+//
+// 删除边界校验：对「剩余已提交历史 + 本 Turn 暂存消息」调用 core.ValidateMessages，
+// 失败原样返回 core 错误（invalid_pairing 并带 CallID），不截断历史。拒绝不关闭 Turn，
+// 调用方可换合法参数在同一 Turn 内继续操作。
+func (t *Turn) DropLeading(n int) error {
+	const op = "session.Turn.DropLeading"
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed {
+		return turnClosedError(op)
+	}
+	if n < 0 || n > len(t.base) {
+		return invalidArgumentError(op, fmt.Sprintf("删除条数 %d 超出本次可删范围 [0, %d]", n, len(t.base)))
+	}
+	if n == 0 {
+		return nil
+	}
+
+	remaining := t.base[n:]
+	combined := make([]core.Message, 0, len(remaining)+len(t.messages))
+	combined = append(combined, remaining...)
+	combined = append(combined, t.messages...)
+	if err := core.ValidateMessages(combined); err != nil {
+		return err
+	}
+
+	kept := make([]core.Message, len(remaining))
+	copy(kept, remaining)
+	t.base = kept
+	return nil
 }
 
 // Append 把一批消息追加到暂存区。
@@ -182,7 +227,7 @@ func (t *Turn) close() {
 	t.closed = true
 }
 
-// staged 返回待提交的完整会话内容：已提交历史 + 暂存消息、摘要与 Todo。
+// staged 返回待提交的完整会话内容：剩余已提交历史 + 暂存消息、摘要与 Todo。
 // 返回值为独立副本，调用方可直接发布。
 func (t *Turn) staged() ([]core.Message, string, []Todo) {
 	t.mu.Lock()
