@@ -8,7 +8,7 @@ resources:
   reservations: {}
 
 review:
-  status: PENDING
+  status: CHANGES_REQUIRED
   target: "480831d5040a5b481be87ee6ff576737662a9c15"
 
 owner:
