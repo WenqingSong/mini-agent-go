@@ -7,7 +7,9 @@
 
 APPROVED
 
-适用范围与前置依赖：本 Contract 的 D1 / D3 / D4 / D5 可立即实现；**AC-007 的「被覆盖消息从 Session 移除」被一个跨任务前置依赖阻塞**（见「External Dependency」），依赖由独立 Session 扩展任务交付并集成后，T07 Coder 才可完成 AC-007。T07 不得以任何降级方式（只写 Summary 不删除、重入 `Save`、绕过执行权、直接改 Session 内部数据）替代该依赖。
+Revision R1（2026-10-20）：前置依赖已交付并集成，全部 AC 可开始实现；D1–D5 的决定内容不变。
+
+适用范围：D1–D5 与 AC-001—AC-009 全部可立即实现。AC-007 的「被覆盖消息从 Session 移除」使用已交付的 `session.Turn.DropLeading(n int) error`（见「External Dependency」）；T07 仍不得修改 `session` 任何公共符号，也不得以只写 `Summary` 不删除、重入 `Save`、绕过执行权或直接改 Session 内部数据的方式替代该能力。
 
 ## Problem
 
@@ -95,15 +97,16 @@ RECOMMENDATION：新增顶层包 `agent`，`Loop` 一次装配、`Run` 可并发
 - 测试只用 Fake LLM / Fake Tool，不调用真实付费 LLM API、不需要网络。
 - 不修改 Workflow Engine、不绕过任何 Gate。
 
-## External Dependency（T07 前置，非 T07 实施）
+## External Dependency（T07 前置，已交付，非 T07 实施）
 
 | 项 | 内容 |
 | --- | --- |
-| 能力 | `session.Turn` 增加「删除已提交基线的前 N 条消息」的事务内写操作（D2 语义），本 Contract 以 `DropLeading(n int) error` 指代，最终命名与契约由该任务定稿 |
-| 归属 | **最小独立 Session 扩展任务**（T04 已集成，走新任务而非 T04 Contract Revision）；由 Owner / TaskBuilder 创建，走完整 Analyst → Coder → Cleaner → OwnerGate → Deliverer → 集成流程 |
-| 建议范围 | 仅该写操作 + 其边界/原子性/关闭后拒绝的测试；不改 `Append`；不改 `Manager`；不新增 `ErrorKind`；同步 Design §8.1 / §11.1 / §12 |
-| T07 受影响项 | AC-007 的「被覆盖消息从 Session 移除」。其余 AC（001–006、008）不依赖该能力 |
-| 解除条件 | 该任务合并进 `develop` 后，T07 重新进入 Coder；在此之前 T07 不得开始实现（`blocked.active=true`） |
+| 状态 | **DELIVERED**：`session-turn-drop-leading-v1` 已完成（contract APPROVED `bcc8e96`、review CLEAN / owner ACCEPTED / delivery PASS、C1 `2ed50f1`），已合并 `develop`（`635e311`），并已合并进本 feature（`7de65a1`） |
+| 交付接口 | `func (t *Turn) DropLeading(n int) error`，错误 `Op = "session.Turn.DropLeading"`；已核实签名与语义与 D2 要求一致 |
+| 语义（已核实） | `n` 是**本次调用的增量**，作用于当前剩余已提交历史；同一 Turn 内累计删除单调不减，已删除不可恢复；`n=0` 空操作，`0 <= n <= len(base)`，越界与负数返回 `invalid_argument`；删除边界使「剩余历史 + 本 Turn 暂存消息」违反配对即返回 `invalid_pairing`（带 `CallID`）并原子拒绝；拒绝不关闭 Turn；Turn 关闭后拒绝写入；不改变 `Summary`、不移动或删除本 Turn `Append` 的消息 |
+| T07 用法 | 提交阶段只调用**一次**：`SetSummary` → `DropLeading(min(head, baseLen))` → `Append(history[max(head, baseLen):]...)`（`head` 为累计被压缩覆盖的前缀长度） |
+| T07 受影响项 | AC-007 的「被覆盖消息从 Session 移除」；Design INV-017 / §8.1 为该能力的长期事实 |
+| 约束不变 | T07 仍不得修改 `session` 任何公共符号、不得重入 `Save`、不得绕过执行权、不得直接改 Session 内部数据 |
 
 ## Interfaces and Data
 
@@ -270,7 +273,7 @@ loop（整个 Run 期间持有会话执行权）:
 
 禁止：
 
-- 修改 `session`（T04）任何公共符号，包括 T07 自己实现 `DropLeading`；禁止重入 `Save`、绕过执行权、直接改 Session 内部数据。该能力由前置任务交付。
+- 修改 `session`（T04）任何公共符号，包括 T07 自己实现或改写 `DropLeading`；禁止重入 `Save`、绕过执行权、直接改 Session 内部数据。该能力已由 `session-turn-drop-leading-v1` 交付，T07 只调用。
 - 修改 `core` / `llm`（含 `llm/openai`）/ `tool` / `contextmgr` / `runlog` 的任何公共符号；新增 `ErrorKind`；导出 `Role` / `FinishReason` 常量（包内用字面量转换）。
 - 引入 `builtin` / `llm/openai` 依赖（`agent` 只 import 标准库 + `core`/`llm`/`tool`/`session`/`contextmgr`/`runlog`）；做 Todo 端口适配、生产 `Summarizer`、Provider 重试/限流/streaming、并行工具执行、CLI/HTTP。
 - 以「只写 `Summary` 不删除被覆盖消息」等方式降级实现 AC-007。
@@ -287,7 +290,7 @@ loop（整个 Run 期间持有会话执行权）:
 - INV-006 → 取消与超时分别在「等执行权」「模型调用中」「工具调用中」触发，断言 `CANCELLED` + 对应 Kind 且 Session 不变；覆盖「工具已执行后 Provider 失败/超时」：`ToolCalls` 等于真实执行次数、结果消息仍在且未被改写、无回滚/补偿语义。（AC-004⑤⑥、AC-006②）
 - INV-007 → 同会话 N≥3 并发 Run：消息组连续不交错、总数 = 各 Run 之和；不同 Session + 阻塞 Provider 可同时推进；`go test -race ./...` 退出码 0；失败 Sink 下 `RunResult` 与 Session 逐字段与正常 Sink 相同。（AC-005、AC-008）
 - INV-008 → Fake LLM 的确定性表驱动：`stop`+纯文本 → `COMPLETED`；`length`（带/不带 ToolCall）→ `FAILED + provider_failure`；`tool_calls`+空 Call → `FAILED + provider_failure`；`unknown` → `FAILED + provider_failure`；`stop`+ToolCall → 执行工具并继续。（D5、AC-001、AC-004）
-- 上下文（AC-007）→ 超预算用例断言发给 Provider 的 `Messages` 是压缩视图（保留 ≥ `KeepRecent` 条、首条不含 System Prompt）、`Session.Summary` 更新、被覆盖消息已从 `Session.Messages` 移除；未超预算断言 `Compacted=false` 且摘要不变；`Build` 失败断言终态与 Session 完全不变。**该组用例在前置 Session 扩展任务集成后才可通过，Coder 不得以跳过/软化断言方式交付。**
+- 上下文（AC-007）→ 超预算用例断言发给 Provider 的 `Messages` 是压缩视图（保留 ≥ `KeepRecent` 条、首条不含 System Prompt）、`Session.Summary` 更新、被覆盖消息已从 `Session.Messages` 移除（经 `Turn.DropLeading`）；未超预算断言 `Compacted=false` 且摘要不变；`Build` 失败断言终态与 Session 完全不变。依赖已交付，Coder 不得以跳过或软化断言的方式交付。
 - 日志（AC-008）→ `runlog.NewJSONSink(&bytes.Buffer)` 逐行解析：事件种类顺序、`session_id`/`run_id`/`step`/`call_id` 可定位（`tool_finished.call_id == ToolCall.ID`）。
 - 工程检查（AC-009）→ `make test`、`go vet ./...`、`go test -race ./...` 退出码 0；`go list -f '{{.ImportPath}} {{join .Imports " "}}' ./agent` 只出现标准库与六个允许包；`git ls-files` 与 Design §12 差集为空。
 
@@ -311,7 +314,7 @@ loop（整个 Run 期间持有会话执行权）:
 - `KeepRecent=0` 且超预算时，压缩可能覆盖最后一条 user 消息（会话只保留摘要）。`DropLeading` 不会删除本 Turn 追加的消息，但被摘要覆盖的历史文本不再逐字留在 Session；装配侧应以 `KeepRecent ≥ 1` 控制。
 - 「工具执行尝试」口径：取消恰好落在某次工具调用时该次尝试计入 `ToolCalls`，但工具实现可能并未真正运行（执行器在 `ctx` 已结束时提前返回）；AC-006② 覆盖的场景不受影响。
 - `head` 越过 `baseLen` 依赖 `contextmgr` 的原子单元压缩语义；若该语义变更需回归。
-- 前置 Session 扩展任务的编号/分支/排期未定，T07 处于阻塞；该任务的接口命名若与本 Contract 的 `DropLeading` 不同，T07 只做适配，Design 以该任务 Contract 为准。
+- 前置依赖已交付（`session-turn-drop-leading-v1`），接口命名与语义和本 Contract 一致（`Turn.DropLeading`，增量为语义），T07 只需按「提交阶段一次调用、参数为累计覆盖条数」使用；该风险已关闭。
 
 ## Owner Decision Record
 
@@ -332,5 +335,14 @@ T04 交付状态核实：`agent-session-manager-v1` 的 contract / review / owne
 
 未由 T07 实施、需其他角色承接的事项（本 Contract 不代替其批准）：
 
-- TaskBuilder：关闭 `task.md` 的 OQ-1/OQ-2/OQ-3；登记前置 Session 扩展任务与 T08 服务装配范围（含 Todo 适配、生产 `Summarizer`、真实 tokenizer 校准的归属）。
-- Owner / TaskBuilder：创建前置 Session 扩展任务及其 feature branch，走完整流程并集成到 `develop`；之后 T07 解除 `blocked` 再进入 Coder。
+- TaskBuilder：关闭 `task.md` 的 OQ-1/OQ-2/OQ-3；登记 T08 服务装配范围（含 Todo 适配、生产 `Summarizer`、真实 tokenizer 校准的归属）。
+- ~~Owner / TaskBuilder：创建前置 Session 扩展任务…~~ **已完成**：前置任务 `session-turn-drop-leading-v1` 已交付并合并 `develop`（`635e311`），T07 解除阻塞。
+
+### Revision R1（2026-10-20，依赖交付后的重新分析）
+
+分类：`ENVIRONMENT_GAP`（前置能力缺失已补齐，设计无需变更）。
+
+- 触发：Owner 通知前置任务已更新，要求重新分析。
+- 已核实：`session-turn-drop-leading-v1` 的 contract / review / owner / delivery 均为终态；`Turn.DropLeading` 签名与语义符合 D2；已合并 `develop`（`635e311`）并合入本 feature（`7de65a1`）；合并后 `go vet ./...`、`go test ./...`、`go test -race ./...` 全绿。
+- 本次修订范围：仅「依赖状态与接口核实」、AC-007 验证措辞、禁止项措辞、Open Risks 对应条目；**D1–D5 的已批准设计、接口、计数器口径、终态映射与不变量均未改变**，原决定记录全部保留。
+- 前置任务反向影响：Design §8.1 / INV-017 / §12 已由该任务落库；T07 的 Design 更新（`8f44dc3`）与其无冲突，仅需把「由独立 Session 扩展任务交付」改为已完成事实。
