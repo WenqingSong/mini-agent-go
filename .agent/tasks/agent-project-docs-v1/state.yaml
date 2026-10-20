@@ -16,7 +16,10 @@ owner:
   review_target: "05a49e8c23b86190f63571c3485176d8db6bc718"
 
 delivery:
-  status: NOT_RUN
+  status: PASS
+  review_target: "05a49e8c23b86190f63571c3485176d8db6bc718"
+  feature_head: "152a34f3dff1f2836aa55b9550e0f3288efb92cb"
+  develop_base: "d54c912540c090fa7c80961cb6a7cbee8e6ec9a0"
 
 blocked:
   active: false
