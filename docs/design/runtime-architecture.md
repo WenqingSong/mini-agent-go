@@ -165,6 +165,13 @@ RUNNING ──► COMPLETED        （模型不再要求工具调用）
 | `llm/provider.go` | llm | Provider / Request / Response / Usage / FinishReason |
 | `llm/provider_test.go` | llm | `Response.Validate` 边界 |
 | `tool/tool.go` | tool | Tool / Request / Registry |
+| `tool/registry.go` | tool | `MapRegistry` / `NewMapRegistry` / `Register` / `Seal` / `Lookup` / `Specs` 与注册哨兵错误 |
+| `tool/validate.go` | tool | JSON Schema 子集注册校验、调用期参数校验与错误文本 |
+| `tool/executor.go` | tool | `Executor` / `ExecutorOptions` / 同 Run 去重占位 / 超时、取消与 panic 处理 |
+| `tool/registry_test.go` | tool | 注册拒绝、查找、`Specs` 深拷贝与排序、`Seal`、并发访问 |
+| `tool/validate_test.go` | tool | Schema fail-closed 与参数校验表驱动 |
+| `tool/executor_test.go` | tool | 执行结果、失败归类、去重范围与 goroutine 收敛 |
+| `tool/fake_test.go` | tool | Fake Tool 与测试辅助（调用计数、watchdog、请求构造） |
 | `session/session.go` | session | TodoStatus / Todo / Session / Store |
 | `contextmgr/contextmgr.go` | contextmgr | Request / Result / Manager |
 | `runlog/runlog.go` | runlog | EventKind / Event / Sink / Discard |
