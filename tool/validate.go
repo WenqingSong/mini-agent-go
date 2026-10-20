@@ -215,6 +215,9 @@ func validateArguments(toolName string, schema, args json.RawMessage) error {
 }
 
 // validateValue 按固定顺序校验：类型 → enum → required 声明顺序 → properties 键字典序 → 数组下标升序。
+//
+// required / properties / additionalProperties 与 items 依据参数值的实际形态生效：
+// 子 Schema 未声明 type 时这些约束同样不得被静默忽略（CLEAN-001，AC-002 / D4）。
 func validateValue(node *schemaNode, value any, path string) error {
 	if node.typ != "" && !matchesType(node.typ, value) {
 		return &argumentError{path: path, reason: fmt.Sprintf("期望 %s，实际 %s", node.typ, jsonTypeName(value))}
@@ -223,37 +226,52 @@ func validateValue(node *schemaNode, value any, path string) error {
 		return &argumentError{path: path, reason: "不在枚举取值内"}
 	}
 
-	switch node.typ {
-	case "object":
-		obj := value.(map[string]any)
-		for _, name := range node.required {
-			if _, ok := obj[name]; !ok {
-				return &argumentError{path: joinPath(path, name), reason: "缺少必填字段"}
-			}
+	if obj, ok := value.(map[string]any); ok {
+		if err := validateObject(node, obj, path); err != nil {
+			return err
 		}
-		for _, key := range sortedKeys(obj) {
-			if child, ok := node.properties[key]; ok {
-				if err := validateValue(child, obj[key], joinPath(path, key)); err != nil {
-					return err
-				}
-				continue
-			}
+	}
+	if arr, ok := value.([]any); ok {
+		if err := validateArray(node, arr, path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateObject 施加对象约束：先按 required 声明顺序查必填，再按 properties 键字典序递归校验，
+// additionalProperties=false 时未声明字段即失败。
+func validateObject(node *schemaNode, obj map[string]any, path string) error {
+	for _, name := range node.required {
+		if _, ok := obj[name]; !ok {
+			return &argumentError{path: joinPath(path, name), reason: "缺少必填字段"}
+		}
+	}
+	for _, key := range sortedKeys(obj) {
+		child, ok := node.properties[key]
+		if !ok {
 			if !node.additionalProperties {
 				return &argumentError{path: joinPath(path, key), reason: "未声明的字段"}
 			}
+			continue
 		}
-	case "array":
-		items := value.([]any)
-		if node.items == nil {
-			return nil
-		}
-		for i, item := range items {
-			if err := validateValue(node.items, item, fmt.Sprintf("%s[%d]", path, i)); err != nil {
-				return err
-			}
+		if err := validateValue(child, obj[key], joinPath(path, key)); err != nil {
+			return err
 		}
 	}
+	return nil
+}
 
+// validateArray 按数组下标升序施加 items 约束。
+func validateArray(node *schemaNode, items []any, path string) error {
+	if node.items == nil {
+		return nil
+	}
+	for i, item := range items {
+		if err := validateValue(node.items, item, fmt.Sprintf("%s[%d]", path, i)); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

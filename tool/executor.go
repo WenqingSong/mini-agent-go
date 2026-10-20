@@ -160,6 +160,14 @@ func (e *Executor) run(ctx context.Context, t Tool, req Request) (core.ToolResul
 		timeoutC = timer.C
 	}
 
+	// 父 Context 结束信号经 context.AfterFunc 转投到独立通道：close(ctx.Done()) 会直接
+	// 抢占正在 select 的调用方，使「工具结果已产出、但父 Context 已结束」的分支永远走不到。
+	// 经独立 goroutine 转投后，工具 goroutine（已在运行）通常先投递结果，该分支因此可被
+	// 确定性地执行与测试（CLEAN-002）。
+	abort := make(chan struct{})
+	stopWatch := context.AfterFunc(ctx, func() { close(abort) })
+	defer stopWatch()
+
 	select {
 	case out := <-done:
 		// 取消优先于工具结果：父 Context 已结束时丢弃工具产出。
@@ -181,6 +189,7 @@ func (e *Executor) run(ctx context.Context, t Tool, req Request) (core.ToolResul
 		out.result.Name = req.Call.Name
 		return out.result, nil
 	case <-timeoutC:
+		// 工具级超时以父 Context 仍存活为前提；两者同时结束时归因到取消/整体超时。
 		if err := ctx.Err(); err != nil {
 			return core.ToolResult{}, contextRunError(err, req.Call.ID)
 		}
@@ -190,7 +199,7 @@ func (e *Executor) run(ctx context.Context, t Tool, req Request) (core.ToolResul
 			Content: fmt.Sprintf("工具 %s 执行超时（%s）", req.Call.Name, e.timeout),
 			IsError: true,
 		}, nil
-	case <-ctx.Done():
+	case <-abort:
 		return core.ToolResult{}, contextRunError(ctx.Err(), req.Call.ID)
 	}
 }

@@ -493,3 +493,91 @@ func TestExecutorTimeoutDoesNotGrowGoroutines(t *testing.T) {
 		return runtime.NumGoroutine() <= baseline+10
 	}, "连续工具级超时后 goroutine 未在收敛窗口内回落")
 }
+
+// TestExecutorRejectsNestedConstraintsWithoutType 覆盖 CLEAN-001：子 Schema 未声明 type 时，
+// 必填 / 类型 / 未声明字段约束仍必须生效，非法参数不得透传给工具实现。
+func TestExecutorRejectsNestedConstraintsWithoutType(t *testing.T) {
+	const schema = `{
+	  "type":"object",
+	  "properties":{
+	    "address":{"properties":{"zip":{"type":"string"}},"required":["zip"],"additionalProperties":false}
+	  }
+	}`
+
+	cases := []struct {
+		name       string
+		args       string
+		wantDetail string
+		wantCalled bool
+	}{
+		{name: "嵌套缺少必填字段", args: `{"address":{}}`, wantDetail: "$.address.zip: 缺少必填字段"},
+		{name: "嵌套字段类型不符", args: `{"address":{"zip":1}}`, wantDetail: "$.address.zip: 期望 string，实际 number"},
+		{name: "嵌套未声明字段", args: `{"address":{"zip":"1","city":"x"}}`, wantDetail: "$.address.city: 未声明的字段"},
+		{name: "合法参数放行", args: `{"address":{"zip":"100"}}`, wantCalled: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			demo := newFakeTool("demo").withParameters(schema)
+			executor := newTestExecutor(t, time.Second, demo)
+
+			result, err := executor.Execute(context.Background(), toolRequest("run-1", "call-1", "demo", tc.args))
+			if tc.wantCalled {
+				if err != nil {
+					t.Fatalf("合法参数不应被拒绝：%v", err)
+				}
+				if result.IsError {
+					t.Fatalf("合法参数不应被标记 IsError，Content=%q", result.Content)
+				}
+				if got := demo.callCount(); got != 1 {
+					t.Fatalf("合法参数应放行到工具实现，实际调用 %d 次", got)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("非法参数应以 IsError 结果承载，不应上抛：%v", err)
+			}
+			if !result.IsError {
+				t.Fatal("未声明 type 的子 Schema 约束必须生效")
+			}
+			if !strings.Contains(result.Content, tc.wantDetail) {
+				t.Fatalf("Content 应包含 %q，实际 %q", tc.wantDetail, result.Content)
+			}
+			if got := demo.callCount(); got != 0 {
+				t.Fatalf("参数校验失败时工具实现一次都不应被调用，实际 %d 次", got)
+			}
+		})
+	}
+}
+
+// TestExecutorCancelBeatsToolResult 覆盖「取消优先于工具结果」（INV-106 / CLEAN-002）：
+// 工具产出结果时父 Context 已结束，执行器必须丢弃结果并返回 ctx 错误。
+//
+// 工具在返回前自行取消父 Context，确定性地制造「结果已产出、父 Context 已结束」的竞态窗口：
+// 无论 select 先取到工具结果还是父 Context 结束，调用方得到的都必须是 ctx 错误。
+// 若删除该守卫，循环中会出现 IsError=false 的成功结果，本测试随之失败。
+func TestExecutorCancelBeatsToolResult(t *testing.T) {
+	const iterations = 200
+
+	for i := 0; i < iterations; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		echo := newFakeTool("echo").withFunc(func(context.Context, Request) (core.ToolResult, error) {
+			cancel() // 父 Context 先结束，工具随后才产出结果
+			return core.ToolResult{Content: "工具结果"}, nil
+		})
+		executor := newTestExecutor(t, time.Second, echo)
+
+		result, err := executeWithWatchdog(t, executor, ctx,
+			toolRequest("run-1", fmt.Sprintf("call-%03d", i), "echo", `{}`))
+
+		expectErrorKind(t, err, core.KindCancelled)
+		if result != (core.ToolResult{}) {
+			t.Fatalf("第 %d 次：父 Context 结束后必须丢弃工具结果，实际 %+v", i+1, result)
+		}
+		if got := echo.callCount(); got != 1 {
+			t.Fatalf("第 %d 次：工具应被调用 1 次，实际 %d 次", i+1, got)
+		}
+		cancel()
+	}
+}

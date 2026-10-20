@@ -281,3 +281,45 @@ func TestValidateArgumentsErrorOrder(t *testing.T) {
 		t.Fatalf("properties 键应按字典序先报 $.y，实际 %v", err)
 	}
 }
+
+// TestValidateArgumentsEnforceConstraintsWithoutType 覆盖 CLEAN-001：子 Schema 未声明 type 时，
+// required / properties / additionalProperties / items 仍必须生效，不得静默忽略约束。
+func TestValidateArgumentsEnforceConstraintsWithoutType(t *testing.T) {
+	const objectSchema = `{
+	  "type":"object",
+	  "properties":{
+	    "address":{"properties":{"zip":{"type":"string"}},"required":["zip"],"additionalProperties":false}
+	  }
+	}`
+
+	objectCases := []struct {
+		name       string
+		args       string
+		wantDetail string
+	}{
+		{name: "缺少必填字段", args: `{"address":{}}`, wantDetail: "$.address.zip: 缺少必填字段"},
+		{name: "字段类型不符", args: `{"address":{"zip":1}}`, wantDetail: "$.address.zip: 期望 string，实际 number"},
+		{name: "未声明字段", args: `{"address":{"zip":"1","city":"x"}}`, wantDetail: "$.address.city: 未声明的字段"},
+		{name: "合法参数", args: `{"address":{"zip":"100"}}`},
+	}
+	for _, tc := range objectCases {
+		t.Run("嵌套对象/"+tc.name, func(t *testing.T) {
+			err := validateArguments("demo", json.RawMessage(objectSchema), json.RawMessage(tc.args))
+			if tc.wantDetail == "" {
+				if err != nil {
+					t.Fatalf("合法参数不应报错：%v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("未声明 type 的子 Schema 约束必须生效，期望包含 %q", tc.wantDetail)
+			}
+			if !strings.Contains(err.Error(), tc.wantDetail) {
+				t.Fatalf("错误文本应包含 %q，实际 %v", tc.wantDetail, err)
+			}
+		})
+	}
+
+	// items 未随 type=array 声明时，注册期即按 fail-closed 拒绝（见 TestValidateToolSpecRejectsUnsupportedSchema），
+	// 因此调用期不会出现「数组约束被静默忽略」的入口；此处不再重复构造不可达路径。
+}
