@@ -67,7 +67,7 @@ func NewManager(estimator Estimator, summarizer Summarizer) (Manager, error)
 1. **System Prompt 与摘要用显式字段，而不是塞进 `Messages` 的 system 消息**。理由：AC-001 明确要求「请求包含 System Prompt」；显式字段让「永不压缩」可判定，避免「哪些 system 消息算 pinned」的歧义。代价：`Request` 新增字段、`Messages` 中出现 system 消息被拒绝（比 `core` 更窄的输入契约）。
 2. **只保留一个触发点：完整输入视图估算 > `TokenBudget` 时压缩**，不引入 ratio/水位配置。理由：AC-001 要求「未超预算必须保持完整」，任何 <100% 的阈值都会与 AC-001 冲突；多一个比例配置只会增加未验证语义。AC-002 的「配置的阈值」由 `TokenBudget` 本身承担。
 3. **摘要以一条独立 `system` 消息插入在 System Prompt 之后**，纯文本，`ID`/`Raw` 为空；旧 `PreviousSummary` 通过 `SummarizeRequest.PreviousSummary` 与新历史一起重新摘要，由新摘要整体替换，不同时保留两条摘要（D1）。
-4. **压缩算法：先按 `KeepRecent` 取尾部，再逐步吞并最老保留单元直到满足预算**，并设 `Summarizer` 调用上限与进展检查（D3）。确定性优先，代价是可能多次调用 `Summarizer`。
+4. **压缩算法：先按 `KeepRecent` 取保留尾部，再对尾部之前的全部 Unit 做一次压缩**；`KeepRecent` 是硬下限，不通过继续删减保留消息凑预算（D3）。确定性优先，代价是一次压缩后仍超预算只能显式失败。
 5. **`KeepRecent` 目标无法在预算内满足时明确失败**，不做放宽保留的降级（D3 批准的取舍：宁可显式失败，不破坏配对、不返回部分视图）。
 
 ## Selected Design
@@ -90,8 +90,8 @@ func NewManager(estimator Estimator, summarizer Summarizer) (Manager, error)
 1. 校验配置与输入：`KeepRecent < 0`、`Messages` 含 `RoleSystem`、构造期 estimator/summarizer 为 nil → `invalid_argument`；`core.ValidateMessages` 失败 → 原样返回该错误（保持 `Kind`/`CallID`）；`ctx` 已取消/超时 → `cancelled` / `deadline_exceeded`。
 2. 计算完整输入视图的估算值（System Prompt 消息 + PreviousSummary 消息 + 全部 `Messages`）；`TokenBudget <= 0` 或未超预算 → 直接返回，`Compacted=false`、`Summary=""`、`DroppedMessages=0`。
 3. 把 `Messages` 划分为原子 Unit（见 Interfaces and Data）；从尾部按 Unit 累加，取「消息条数 ≥ `KeepRecent`」的最小尾部。若已无更早 Unit 可压缩（含 `KeepRecent` ≥ 总条数、或历史只剩尾部），→ `invalid_argument`（保留约束下无法满足预算，D3：明确失败，不降级）。
-4. 调用 `Summarizer` 压缩除尾部外的全部 Unit，得到摘要文本，组装视图并复算估算值。
-5. 仍超预算 → 把保留尾部中最老的一个 Unit 并入压缩集合，重新调用 `Summarizer`，重复至满足预算。单次 `Build` 的 `Summarizer` 调用上限为 `unitCount + 1`；每一轮必须使保留尾部消息数严格减少（至少并入一个 Unit）。达到上限或无法取得进展 → `internal`（「压缩无法取得有效进展」），禁止无限循环（D3）。
+4. 对保留尾部之前的全部 Unit 调用**一次** `Summarizer`（`Messages` = 这些 Unit 按原顺序拼接，`PreviousSummary` 原样带入），得到摘要文本。
+5. 组装视图（System Prompt + 新摘要 + 保留尾部）并复算估算值；仍超预算 → `invalid_argument`（「System Prompt、摘要与 `KeepRecent` 条近期消息合计超出预算」），返回零值 `Result`。单次 `Build` 最多调用 `Summarizer` 一次，不存在继续吞并保留消息以满足预算的路径（D3）。
 6. 输出前再次以 `core.ValidateMessages` 自检（防御）；自检失败按 `internal` 处理。
 
 **失败时不丢历史**：所有错误路径返回零值 `Result`（`Messages=nil`、`Compacted=false`、`DroppedMessages=0`、`Summary=""`），调用方拿不到任何新摘要与覆盖信息；按持久化配方，调用方对失败 Build 不得修改任何持久化状态，旧历史与旧摘要保持原样。因此旧摘要只会被「成功返回的新摘要」显式替换，不存在静默丢弃或静默截断。
@@ -127,7 +127,7 @@ func NewManager(estimator Estimator, summarizer Summarizer) (Manager, error)
 - INV-005：`Compacted=true` ⇔ `Summary != ""` 且 `DroppedMessages ≥ 1`；`DroppedMessages` 恰等于最终被压缩 Unit 包含的消息条数，且被覆盖消息恰为 `req.Messages` 的前 `DroppedMessages` 条（不虚报、不含 `PreviousSummary`）。
 - INV-006：相同 `Request` + 相同注入实现（确定性估算器与 Fake Summarizer）→ 逐条相同的 `Result`。
 - INV-007：`contextmgr` 只依赖标准库与 `core`（`go list` 机械核对）。
-- INV-008：单次 `Build` 内 `Summarizer` 调用次数 ≤ `unitCount + 1`，且每轮压缩后保留消息数严格减少；不可能无限循环。
+- INV-008：单次 `Build` 最多调用 `Summarizer` 一次（`Compacted=true` 时恰好一次）；保留消息条数始终 ≥ `KeepRecent`，不存在为凑预算继续删减保留消息的路径，也不可能无限循环。
 
 ## Failure and Consistency Semantics
 
@@ -142,7 +142,6 @@ func NewManager(estimator Estimator, summarizer Summarizer) (Manager, error)
 | 预算无法满足（含 System Prompt、`KeepRecent` 目标、摘要本身超预算） | `invalid_argument` | 错误文本给出可识别的具体原因（哪一部分装不下） |
 | `Summarizer` 返回 error | `internal` | `Cause` 保留原始错误，`errors.Is/As` 可追溯 |
 | 摘要为空或全空白 | `internal` | 不得用占位文本冒充摘要 |
-| 达到 `Summarizer` 调用上限或压缩无进展 | `internal` | 「压缩无法取得有效进展」 |
 | `ctx` 取消 / 超时 | `cancelled` / `deadline_exceeded` | 不透传为 `internal` |
 
 错误路径不返回任何可被误判为成功的压缩结果；调用方不据此修改持久化状态，历史与旧摘要保持原样。
@@ -161,13 +160,13 @@ func NewManager(estimator Estimator, summarizer Summarizer) (Manager, error)
 - INV-005 → 长历史压缩用例：断言 `Compacted=true`、`Summary` 等于视图摘要消息文本、`DroppedMessages` 等于被压缩 Unit 的消息条数、被覆盖消息恰为输入前 `DroppedMessages` 条、`len(Result.Messages) = system?+1+尾部条数`。
 - INV-006 → 同输入连续调用两次，`reflect.DeepEqual` 相等；再以不同注入估算器验证预算判断确实随注入变化。
 - INV-007 → `go list -f '{{.ImportPath}} {{join .Imports " "}}' ./contextmgr` 只含标准库与 `core`；`go build ./...`、`go vet ./...`、`go test ./...`（`make test`）退出码 0，测试无网络。
-- INV-008 → 构造「每轮吞并一个 Unit 仍超预算」的场景，断言 `Summarizer` 被调用次数 ≤ `unitCount+1`，最终要么成功要么返回 `internal`，不得死循环。
+- INV-008 → 构造「单次压缩后仍超预算」场景：断言 `Summarizer` 恰好被调用 1 次、返回 `invalid_argument`、`Result` 为零值；成功路径断言保留条数 ≥ `KeepRecent`（与 AC-002 用例复用）。
 - 环境：Linux + Go 1.24.x，无 MySQL/Redis/MQ/外部服务，无真实模型调用。
 
 ## Open Risks
 
 - 默认启发式按 4 字符/token 估算，对中文（CJK）可能明显低估，真实 Provider 仍可能溢出；`TokenBudget` 只是估算预算，生产装配须注入校准后的估算器。
-- 逐 Unit 吞并可能多次调用 `Summarizer`（受 `unitCount+1` 上限约束），真实摘要成本未在 v1 优化；T07 接入真实 LLM Summarizer 时须把摘要调用计入 `RunPolicy` 预算。
+- 单次压缩后仍超预算只能显式失败，调用方需增大 `TokenBudget` 或缩减输入；T07 接入真实 LLM Summarizer 时须把该次调用计入 `RunPolicy` 预算。
 - `core` 未导出 `text` 内容类型常量，`contextmgr` 需复制字面量 `"text"`；若 `core` 变更取值，只能靠校验期错误发现。
 - `Messages` 禁止 system 消息是比 `core` 更窄的输入契约，装配层（T01）必须把 system 内容交给 `SystemPrompt`，否则会拿到 `invalid_argument`。
 
@@ -180,3 +179,4 @@ func NewManager(estimator Estimator, summarizer Summarizer) (Manager, error)
 | D3 | 批准 `TokenBudget` 为唯一压缩触发阈值；未超预算不得压缩；超预算按完整 Unit 压缩；System Prompt 保留；`KeepRecent` 超预算时明确失败（不降级）；`Summarizer` 调用须有上限与进展检查；`TokenBudget` 是估算预算，T07 负责为工具 Schema、模型输出预留 | 压缩算法、失败语义、Design §9/§14 表述 |
 | D4 | 批准失败语义：预算不可满足 → `invalid_argument`（含可识别具体原因）；摘要失败/空摘要/无进展 → `internal`（保留 Cause）；错误路径不返回部分压缩结果；不新增 `ErrorKind`，不泄漏敏感信息 | Failure and Consistency Semantics 全表 |
 | D5 | 批准 `Summarizer` 纯文本摘要、`NewManager` 拒绝 nil；测试用 Fake Summarizer，不接真实模型；生产 LLM Summarizer 归 T07，且 T07 须将摘要调用计入 `RunPolicy` | 接口定义、测试策略、T07 边界 |
+| R1 | 批准（CLEAN-005 修订）：压缩算法收敛为「按 `KeepRecent` 取保留尾部 + 单次压缩 + 预算不满足即 `invalid_argument`」；删除多次调用/逐单元吞并/无进展 `internal` 表述；同时授权在实现阶段新增具区分力的边界回归测试作为新的 Implementation Evidence Commit（C1''），公开契约、D1—D5 与 AC 不变 | `contract.md` 压缩算法、INV-008、失败表、Open Risks；`design §9`；Coder 的 C1'' |
