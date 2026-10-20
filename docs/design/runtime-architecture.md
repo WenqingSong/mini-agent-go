@@ -22,6 +22,9 @@ L1  llm           LLM Provider 接口
     runlog        运行日志 Sink
 L2  builtin       内置工具实现：calculator / mock_search / todo_create / todo_list / todo_complete
 L3  agent         Agent Loop：一次 Run 的循环、预算、终态、提交与事件接线
+    httpapi       HTTP 对外协议层：配置与生命周期、路由、请求解析、错误封套与映射、认证、端口定义
+    service       HTTP ↔ Agent 装配层：同 Turn 适配器、per-Run Loop、reply 提取
+    cmd/mini-agent 可启动入口：环境变量装配、监听、终止信号与优雅关闭
 ```
 
 规则：
@@ -31,7 +34,11 @@ L3  agent         Agent Loop：一次 Run 的循环、预算、终态、提交�
 - L2 `builtin` 只依赖 L0 `core`、L1 `tool`、L1 `session` 与标准库，不依赖 `llm` / `contextmgr` / `runlog`，也不依赖 L3 装配层。
 - L1 不得反向依赖 L2：`session` 不 import `builtin`。Todo 写入端口 `builtin.TodoOperations` 的具体实现（含 Todo ID 生成与状态迁移）由 L3 装配层适配，不由 L1 提供。
 - L3 装配层可以依赖任意 L0 / L1 / L2，但 L0 / L1 / L2 不得反向依赖 L3。
-- 当前 L3 只有 `agent` 一个包，实际依赖只到 L0 / L1（`core` / `llm` / `tool` / `session` / `contextmgr` / `runlog`），不 import `builtin` 与 `llm/openai`：L2 与具体 Provider 由服务装配任务（T08）接线。
+- `agent` 的依赖只到 L0 / L1（`core` / `llm` / `tool` / `session` / `contextmgr` / `runlog`），不 import `builtin`、`llm/openai` 与任何新 L3 包：L2 与具体 Provider 由 `cmd` 装配。
+- `httpapi` 只依赖标准库与 `core` / `session`；不 import `agent` / `llm` / `tool` / `builtin` / `contextmgr` / `runlog` / `service`（HTTP 层通过端口使用 Run 能力，不耦合 Agent Loop）。
+- `service` 依赖 `httpapi`（端口类型）+ `agent` + `core` / `llm` / `tool` / `session` / `contextmgr` / `runlog`；不 import `builtin` / `llm/openai`。
+- `cmd/mini-agent` 是唯一装配点，可依赖任意 L0–L3 包（含 `builtin`、`llm/openai`），只负责配置读取、依赖构造、监听与关闭。
+- L0–L2 与 `agent` 不得反向 import `httpapi` / `service` / `cmd`；`agent` 公共 API 不因 HTTP 入口而变更。
 
 机械核对（AC-001）：
 
@@ -39,7 +46,7 @@ L3  agent         Agent Loop：一次 Run 的循环、预算、终态、提交�
 go list -f '{{.ImportPath}} {{join .Imports " "}}' ./...
 ```
 
-判定：`core` 行的 import 不含 `<module>/`；五个 L1 包只出现 `<module>/core`；`builtin` 行只出现 `<module>/core`、`<module>/tool`、`<module>/session`；出现任何其他模块内 import 即违反分层。
+判定：`core` 行的 import 不含 `<module>/`；五个 L1 包只出现 `<module>/core`；`builtin` 行只出现 `<module>/core`、`<module>/tool`、`<module>/session`；`agent` 行只出现 `<module>/core`、`<module>/llm`、`<module>/tool`、`<module>/session`、`<module>/contextmgr`、`<module>/runlog`；`httpapi` 行只出现 `<module>/core`、`<module>/session`；`service` 行只出现 `<module>/httpapi`、`<module>/agent`、`<module>/core`、`<module>/llm`、`<module>/tool`、`<module>/session`、`<module>/contextmgr`、`<module>/runlog`；`cmd/mini-agent` 行不设上限但不得被任何其他包 import。出现任何其他模块内 import 即违反分层。
 
 根 Module 为 `cnb.cool/framework-station/mini-agent-go`（`go 1.24`，零第三方依赖）。外部 `go get` 可用性未验证。
 
@@ -55,6 +62,9 @@ go list -f '{{.ImportPath}} {{join .Imports " "}}' ./...
 | `contextmgr` | 上下文预算、窗口选择与压缩：在估算预算内构建可送 Provider 的合法消息视图 | 生产 Summarizer（LLM 摘要适配器）、真实 tokenizer、摘要跨 Run 持久化 |
 | `runlog` | 运行事件模型、`Sink` 接口与结构化 JSON 记录（字段语义、脱敏与上限） | 文件落盘/滚动策略、采样、上报后端 |
 | `agent` | 一次 Run 的执行：装配参数与前置校验、上下文视图装配、LLM → Tool → LLM 循环驱动、双预算计数与触限、超时与取消中断、终态映射、整轮原子提交、运行事件接线 | Provider 与工具的具体实现、Todo 端口适配、生产 `Summarizer`、持久化、并行工具调度与性能优化、CLI / HTTP 入口 |
+| `httpapi` | HTTP 对外协议：配置与 fail-closed 校验、默认回环监听与 Bearer 认证、精确路由、有界请求读取与严格字段解析、错误码封闭枚举与 `code → status` 单点映射、请求超时、优雅关闭、`SessionStore` / `Runner` 端口定义 | 调用 Agent Loop、会话读写、Provider/工具装配、流式输出、TLS/CORS/限流/metrics、用户体系 |
+| `service` | HTTP 端口到 Agent Loop 的装配实现：一次真实 `RunTurn` 内的同 Turn 适配器、per-Run `Loop` 构造、用户消息构造、reply 提取、Run 结论到 `RunOutcome` 的映射 | HTTP 协议细节、会话实现、Todo 端口适配、生产 `Summarizer`、Provider 与工具的具体实现 |
+| `cmd/mini-agent` | 可启动入口：环境变量 → 配置与依赖装配（Provider、Registry、Session Manager、Context Manager、日志 Sink）→ 监听 → 终止信号 → 优雅关闭；fail-closed 占位 `Summarizer` | 业务逻辑、协议定义、部署与发布 |
 
 ## 4. 数据模型
 
@@ -330,6 +340,25 @@ INV-017 来源：`session-turn-drop-leading-v1` 的 APPROVED `contract.md`（该
 | `agent/concurrency_test.go` | agent | 同会话串行、跨会话并发、`-race` |
 | `agent/context_test.go` | agent | 上下文压缩视图、摘要提交、`Build` 失败不提交 |
 | `agent/events_test.go` | agent | 事件顺序与定位、失败 Sink 旁路 |
+| `httpapi/config.go` | httpapi | `Config` / 默认值 / `Validate()` / 脱敏 `String()` |
+| `httpapi/server.go` | httpapi | `New` / `ServeHTTP` 分派 / `Serve` / `Shutdown` / `Close` / `Addr` / `BaseContext` |
+| `httpapi/handler.go` | httpapi | 三个端点 handler 与成功响应写出 |
+| `httpapi/request.go` | httpapi | 有界请求读取、严格字段解析与字段级校验 |
+| `httpapi/errors.go` | httpapi | 错误码封闭枚举、`code → status` 单点映射、错误封套写出 |
+| `httpapi/auth.go` | httpapi | Bearer 凭证常量时间校验 |
+| `httpapi/run.go` | httpapi | `SessionStore` / `Runner` / `RunRequest` / `RunOutcome` 端口与结果映射 |
+| `httpapi/config_test.go` | httpapi | 默认回环、fail-closed、脱敏与监听边界 |
+| `httpapi/handler_test.go` | httpapi | 端点契约、多轮、错误与副作用 |
+| `httpapi/errors_test.go` | httpapi | 错误码↔状态码映射表与封套形状 |
+| `httpapi/request_test.go` | httpapi | 媒体类型、JSON 结构、字段与大小上限 |
+| `httpapi/auth_test.go` | httpapi | 缺失/错误凭证一致性与零泄漏扫描 |
+| `httpapi/lifecycle_test.go` | httpapi | 就绪、关闭、宽限期、取消与超时穿透 |
+| `httpapi/fake_test.go` | httpapi | Fake `Runner`、捕获日志 Sink、会话快照辅助 |
+| `service/runner.go` | service | `Deps` / `Config` / `NewRunner` / `Run`（一次 `RunTurn` + `Append` + per-Run `Loop`） |
+| `service/turn.go` | service | 同 Turn `agent.SessionRunner` 适配器、用户消息构造与 reply 提取 |
+| `service/runner_test.go` | service | 真实 `agent.Loop` + Fake Provider/Tool + 真实 `session.Manager`：多轮、工具链路、无半轮、恰好一次 `RunTurn` |
+| `cmd/mini-agent/main.go` | cmd | 环境变量 → 装配 → 监听 → 终止信号 → 优雅关闭；可测入口 `run` |
+| `cmd/mini-agent/main_test.go` | cmd | 启动/就绪/非法配置 fail-closed/关闭幂等 |
 
 规则：
 
@@ -349,22 +378,26 @@ INV-017 来源：`session-turn-drop-leading-v1` 的 APPROVED `contract.md`（该
 未验证：
 
 - `cnb.cool/framework-station/mini-agent-go` 的外部 `go get` 可用性。
-- INV-006 / INV-007 / INV-008 的运行期行为（T00 只有签名、映射函数与契约级测试）；INV-005 现由 §8.1 的能力注入约束与 `session` 测试补充证据。运行期证据待 `agent`（T07，Contract APPROVED，实现未交付）补齐。
-- INV-009—INV-013 只有 `tool` 包单元测试证据，尚未在 `agent` 的 Run 中集成验证（集成与终态映射已定稿：见 §7「提交边界」，实现未交付）。
+- INV-006 / INV-007 / INV-008 的运行期行为（T00 只有签名、映射函数与契约级测试）；INV-005 现由 §8.1 的能力注入约束与 `session` 测试补充证据。运行期证据由 `agent`（T07，已交付并合并入 `develop`）补齐。
+- INV-009—INV-013 只有 `tool` 包单元测试证据，尚未在 `agent` 的 Run 中集成验证（集成与终态映射见 §7「提交边界」，已在 T07 交付）。
 - INV-B05 / INV-B06 的真实会话隔离、跨会话不可写、Todo 生命周期与持久化并发：`builtin` 只有测试专用 Fake 证据，运行期证据归服务装配任务（T08）。
 - Todo 端到端行为（模型发起 `todo_*` 调用到真实 Todo 落库）：需要服务装配任务（T08）把 `session.TodoOperations` 适配成 `builtin.TodoOperations` 后才可验证。
 - `HeuristicEstimator` 与真实模型 token 数的偏差幅度未验证（按 4 字符/token 估算，对 CJK 偏低）；`TokenBudget` 已固定为估算预算，精确校准依赖真实 tokenizer 评估（服务装配任务 T08）。
 - 日志记录在真实 Agent Loop 中产生是否完整、调用方是否真正隔离日志错误，尚未验证；本仓库目前只有 Sink 层的进程内证据。
 - `-race` 与 `go test -race` 未进入 CI（`.cnb.yml` 只有 `make test`），会话并发不变量依赖本地/审查时人工执行。
 - `session` 内存实现无持久化，进程重启数据丢失是既定行为，不做恢复验证。
+- HTTP 服务的运行期行为（端点契约、认证与监听边界、错误码映射、取消/超时穿透、优雅关闭）在 T09 交付后由 `httpapi` / `service` / `cmd` 测试与 Cleaner 核对证明；客户端断开时响应不可达，无法验证客户端实际收到的状态码。
+- v1 服务禁用上下文压缩（`TokenBudget=0`）且不注册 Todo 工具：长会话触达 Provider 限制时以 `provider_failure` 结束，属既定边界而非缺陷。
 
 归属后续任务：
 
 | 内容 | 归属 |
 | --- | --- |
-| 取消/超时在 Loop 中的实际中断点与消息保留策略 | `agent`（T07，Contract APPROVED；设计见 §7「提交边界」，实现未交付） |
-| 跨 step 的 `RunStatus` 终态映射、是否继续/重试决策、同 step 多调用顺序与并发 | `agent`（T07，Contract APPROVED；同 step 多调用按数组序串行，实现未交付） |
-| 真实运行期事件完整性、日志旁路在 Agent Loop 中成立（发出点接线与调用方隔离日志错误） | `agent`（T07，Contract APPROVED；发出点见 §10，实现未交付） |
+| 取消/超时在 Loop 中的实际中断点与消息保留策略 | `agent`（T07，已交付；设计见 §7「提交边界」） |
+| 跨 step 的 `RunStatus` 终态映射、是否继续/重试决策、同 step 多调用顺序与并发 | `agent`（T07，已交付；同 step 多调用按数组序串行） |
+| 真实运行期事件完整性、日志旁路在 Agent Loop 中成立（发出点接线与调用方隔离日志错误） | `agent`（T07，已交付；发出点见 §10） |
+| HTTP 对外协议与可启动入口：三个端点、错误码封闭枚举与状态码映射、Bearer 认证与默认回环监听、请求超时与优雅关闭 | `agent-http-api-v1`（T09，Contract APPROVED，A1 = `46d871d`；契约见 `docs/design/http-api.md`） |
+| HTTP ↔ Agent 装配：同 Turn 适配器、per-Run `Loop`、Provider 接线与 `calculator` 注册 | `agent-http-api-v1`（T09，同上） |
 | `Turn` 前缀删除能力（压缩移除，事务内与追加、摘要同批提交或回滚） | 已完成（`session-turn-drop-leading-v1`，见 §8.1 / INV-017），不再是 `agent` 的前置依赖 |
 | `session.Store` 的持久化实现（DB / Redis）、重启恢复与数据迁移 | Session 持久化任务 |
 | `builtin.TodoOperations` 的适配实现、Todo ID 生成、状态迁移、`ErrTodoNotFound` 映射 | 服务装配任务（T08，编号待 TaskBuilder 确认） |
@@ -378,6 +411,8 @@ INV-017 来源：`session-turn-drop-leading-v1` 的 APPROVED `contract.md`（该
 归属收窄（2026-10-20，`runtime-observability-v1`）：Sink 层旁路（写入失败、Handler 异常、`ctx` 取消、异常载荷）与记录完整性（单行 JSON、并发不交织、字段语义与脱敏）已落入 §10，不再属于 Agent Loop 任务；Agent Loop 仅承担发出点接线、事件完整性以及调用方隔离日志错误。
 
 归属裁定（2026-10-20，`agent-runtime-loop-v1`，Owner 批准）：L3 交付 `agent` 包，承担 Run 内循环、双预算、`finish_reason` 终态判定、提交边界与事件接线（§3 / §7 / §10 / §11.1）。三处范围明确排除，避免无人负责或重复归属：① 压缩后「删除已提交历史前缀」的 `Turn` 写能力已由 `session-turn-drop-leading-v1` 交付（§8.1 / INV-017），`agent` 只调用，不得自行扩展 `session` 公共接口或重入 `Save`；② 生产 Todo 适配（含 ID 生成与状态迁移）与生产 LLM `Summarizer`（含真实 tokenizer 校准）归服务装配任务 T08，编号与范围由 TaskBuilder 正式确认；③ 并行工具执行、Provider 重试/限流与 CLI / HTTP 入口不在 L3 当前范围内。
+
+归属裁定（2026-10-20，`agent-http-api-v1`，Owner 批准）：L3 新增 `httpapi` / `service` / `cmd/mini-agent`，承担 HTTP 对外协议（端点、字段、错误码域、认证与默认回环监听、请求超时与优雅关闭）、HTTP ↔ Agent 的同 Turn 装配（一次真实 `RunTurn`，用户消息与产出同事务提交或整轮回滚）以及可启动入口（环境变量装配、Provider 接线、`calculator` 注册）；对外契约单独沉淀在 `docs/design/http-api.md`。三处边界固定：① `agent` 公共 API 不因 HTTP 入口变更，`service` 只作为 `SessionRunner` 的注入实现方；② Todo 端口适配（含 ID 生成与状态迁移）与生产 LLM `Summarizer`（含真实 tokenizer 校准）仍归 T08，v1 服务只注册 `calculator`、`TokenBudget=0`（不压缩）、`Summarizer` 为 fail-closed 占位；③ 流式输出、异步轮询、TLS / CORS / 限流 / metrics、会话持久化、用户体系与 RBAC 不在 T09 范围。
 
 ## 15. 演进规则
 
