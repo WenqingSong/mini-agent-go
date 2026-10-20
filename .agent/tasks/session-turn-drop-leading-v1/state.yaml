@@ -13,8 +13,8 @@ review:
   target: "2ed50f1c225323dcf392aaea403758576513dcaf"
 
 owner:
-  status: PENDING
-  review_target: ""
+  status: ACCEPTED
+  review_target: "2ed50f1c225323dcf392aaea403758576513dcaf"
 
 delivery:
   status: NOT_RUN
