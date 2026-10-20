@@ -19,8 +19,8 @@ owner:
 delivery:
   status: PASS
   review_target: "8e4d2fd"
-  feature_head: "ce0f507"
-  develop_base: "6902d24"
+  feature_head: "ce0f5076afc0b1741c02375c5d82e3a73bedf8e9"
+  develop_base: "6902d2445665ec356a2db22b33b7749d39d8018e"
 
 blocked:
   active: false

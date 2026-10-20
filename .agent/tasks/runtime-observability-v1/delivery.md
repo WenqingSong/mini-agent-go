@@ -14,7 +14,7 @@
 | OS | Linux 5.4.241-1-tlinux4-0025.13 x86_64（Debian GNU/Linux 12 bookworm） |
 | 运行时 | `go1.24.1 linux/amd64`（`go.mod`：`go 1.24`，零 `require`） |
 | 制品标识 | `git archive ce0f507` 解包至 `/tmp/deliver-rov1`（无 `.git`、无未提交文件） |
-| 参与验证 SHA | `review.target=8e4d2fd`、`feature_head=ce0f507`、`develop_base=6902d24`（= `origin/develop`，merge-base） |
+| 参与验证 SHA | `review.target=8e4d2fd`（`8e4d2fd020936345ce6fd40b34bcc92c504b8c01`）、`feature_head=ce0f507`（`ce0f5076afc0b1741c02375c5d82e3a73bedf8e9`）、`develop_base=6902d24`（`6902d2445665ec356a2db22b33b7749d39d8018e` = `origin/develop`，merge-base） |
 | 配置来源 | 无运行时配置、无 Secret、无外部服务；仅 `go.mod` / `Makefile`（均在 Git 内） |
 | 外部依赖 | 无 MySQL / Redis / Kafka / Docker / 网络依赖；本任务 Out of Scope 明确不需要 |
 | 测试数据与隔离 | 独立临时目录 + 外部消费者模块 `/tmp/deliver-consumer`（`replace` 指向解包快照）；反向对照实验在快照副本内临时改码后立即还原，仓库 `git status` 全程为空 |
