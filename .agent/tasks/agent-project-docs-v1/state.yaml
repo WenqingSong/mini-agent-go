@@ -1,0 +1,22 @@
+schema_version: 3
+task_id: agent-project-docs-v1
+
+contract:
+  status: NOT_REQUIRED
+
+resources:
+  reservations: {}
+
+review:
+  status: NOT_REQUESTED
+
+owner:
+  status: PENDING
+
+delivery:
+  status: NOT_RUN
+
+blocked:
+  active: false
+  by: ""
+  reason: ""
