@@ -171,7 +171,7 @@ RUNNING ──► COMPLETED        （模型不再要求工具调用）
 - 摘要（`session.Session.Summary`）由 Session 持有：Context Manager 只负责生成与更新（经 Turn 能力写入，随 Turn 原子提交），不自行维护一份摘要状态。
 - Loop 的用法（`agent`，`agent-runtime-loop-v1`）：每次模型调用前调用 `Build`，输入 `Messages` = 未被摘要覆盖的历史 + 本次 Run 已产生的消息，`PreviousSummary` = 当前摘要；`Compacted=true` 时累加 `DroppedMessages` 并把本次 `Summary` 作为下一次的 `PreviousSummary`，同一段历史不被重复摘要。
 - System Prompt 以 `llm.Request.System` 传递：视图首条 system 消息（System Prompt）不进入 `llm.Request.Messages`，摘要 system 消息仍保留在其中。
-- 压缩偏移在**提交时一次性生效**：`Summary` 覆盖旧摘要，被覆盖的消息（含本次 Run 自己产生的早期消息）不进入 Session。该前缀删除能力必须在 `Turn` 的事务性工作副本内与追加消息、摘要更新同批提交或回滚，由独立 Session 扩展任务交付（`agent-runtime-loop-v1` 的前置依赖）；Loop 不得以重入 `Save`、绕过执行权或直接改 Session 内部数据替代。
+- 压缩偏移在**提交时一次性生效**：`Summary` 覆盖旧摘要，被覆盖的消息（含本次 Run 自己产生的早期消息）不进入 Session。该前缀删除能力已由 `session-turn-drop-leading-v1` 交付（`Turn.DropLeading`，见 §8.1 / INV-017），Loop 在提交阶段调用一次；Loop 不得以重入 `Save`、绕过执行权或直接改 Session 内部数据替代。
 
 ## 10. 运行日志（runlog）
 
@@ -365,7 +365,7 @@ INV-017 来源：`session-turn-drop-leading-v1` 的 APPROVED `contract.md`（该
 | 取消/超时在 Loop 中的实际中断点与消息保留策略 | `agent`（T07，Contract APPROVED；设计见 §7「提交边界」，实现未交付） |
 | 跨 step 的 `RunStatus` 终态映射、是否继续/重试决策、同 step 多调用顺序与并发 | `agent`（T07，Contract APPROVED；同 step 多调用按数组序串行，实现未交付） |
 | 真实运行期事件完整性、日志旁路在 Agent Loop 中成立（发出点接线与调用方隔离日志错误） | `agent`（T07，Contract APPROVED；发出点见 §10，实现未交付） |
-| `agent` 的 `Turn` 前缀删除能力（压缩移除，事务内与追加、摘要同批提交或回滚） | 独立 Session 扩展任务（`agent-runtime-loop-v1` 前置依赖；T04 已集成，不走 T04 Contract Revision，待 TaskBuilder 创建） |
+| `Turn` 前缀删除能力（压缩移除，事务内与追加、摘要同批提交或回滚） | 已完成（`session-turn-drop-leading-v1`，见 §8.1 / INV-017），不再是 `agent` 的前置依赖 |
 | `session.Store` 的持久化实现（DB / Redis）、重启恢复与数据迁移 | Session 持久化任务 |
 | `builtin.TodoOperations` 的适配实现、Todo ID 生成、状态迁移、`ErrTodoNotFound` 映射 | 服务装配任务（T08，编号待 TaskBuilder 确认） |
 | `session.TodoOperations` 与 `builtin.TodoOperations` 两套端口的集成、真实会话隔离与 Todo 端到端验收 | 服务装配任务（T08）+ 集成验收 |
@@ -377,7 +377,7 @@ INV-017 来源：`session-turn-drop-leading-v1` 的 APPROVED `contract.md`（该
 
 归属收窄（2026-10-20，`runtime-observability-v1`）：Sink 层旁路（写入失败、Handler 异常、`ctx` 取消、异常载荷）与记录完整性（单行 JSON、并发不交织、字段语义与脱敏）已落入 §10，不再属于 Agent Loop 任务；Agent Loop 仅承担发出点接线、事件完整性以及调用方隔离日志错误。
 
-归属裁定（2026-10-20，`agent-runtime-loop-v1`，Owner 批准）：L3 交付 `agent` 包，承担 Run 内循环、双预算、`finish_reason` 终态判定、提交边界与事件接线（§3 / §7 / §10 / §11.1）。三处范围明确排除，避免无人负责或重复归属：① 压缩后「删除已提交历史前缀」的 `Turn` 写能力归独立 Session 扩展任务，是该任务的前置依赖，`agent` 不得自行扩展 `session` 公共接口或重入 `Save`；② 生产 Todo 适配（含 ID 生成与状态迁移）与生产 LLM `Summarizer`（含真实 tokenizer 校准）归服务装配任务 T08，编号与范围由 TaskBuilder 正式确认；③ 并行工具执行、Provider 重试/限流与 CLI / HTTP 入口不在 L3 当前范围内。
+归属裁定（2026-10-20，`agent-runtime-loop-v1`，Owner 批准）：L3 交付 `agent` 包，承担 Run 内循环、双预算、`finish_reason` 终态判定、提交边界与事件接线（§3 / §7 / §10 / §11.1）。三处范围明确排除，避免无人负责或重复归属：① 压缩后「删除已提交历史前缀」的 `Turn` 写能力已由 `session-turn-drop-leading-v1` 交付（§8.1 / INV-017），`agent` 只调用，不得自行扩展 `session` 公共接口或重入 `Save`；② 生产 Todo 适配（含 ID 生成与状态迁移）与生产 LLM `Summarizer`（含真实 tokenizer 校准）归服务装配任务 T08，编号与范围由 TaskBuilder 正式确认；③ 并行工具执行、Provider 重试/限流与 CLI / HTTP 入口不在 L3 当前范围内。
 
 ## 15. 演进规则
 
