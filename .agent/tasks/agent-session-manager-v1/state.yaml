@@ -13,8 +13,8 @@ review:
   target: f23082ad0c25a65317cffe27ca91982dd437ed3f
 
 owner:
-  status: PENDING
-  review_target: ""
+  status: ACCEPTED
+  review_target: f23082ad0c25a65317cffe27ca91982dd437ed3f
 
 delivery:
   status: NOT_RUN
