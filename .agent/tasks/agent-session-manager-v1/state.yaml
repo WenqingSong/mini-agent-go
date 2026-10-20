@@ -2,8 +2,8 @@ schema_version: 3
 task_id: agent-session-manager-v1
 
 contract:
-  status: PENDING
-  target: ""
+  status: APPROVED
+  target: 5263d2fc87d739ab524f2b9db73b74dd0ef30e5d
 
 resources:
   reservations: {}
