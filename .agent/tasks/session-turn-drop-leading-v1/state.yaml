@@ -2,8 +2,8 @@ schema_version: 3
 task_id: session-turn-drop-leading-v1
 
 contract:
-  status: PENDING
-  target: ""
+  status: APPROVED
+  target: "bcc8e96805d8f0754c2b0b75cfc40a7270f3b293"
 
 resources:
   reservations: {}
