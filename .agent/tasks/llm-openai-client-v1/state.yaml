@@ -13,8 +13,8 @@ review:
   target: b3d21464e74b5528bc94dae8da406702c7ca4ada
 
 owner:
-  status: REJECTED
-  review_target: ""
+  status: ACCEPTED
+  review_target: b3d21464e74b5528bc94dae8da406702c7ca4ada
 
 delivery:
   status: NOT_RUN

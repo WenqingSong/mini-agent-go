@@ -2,7 +2,7 @@
 
 ## Review Target
 
-`5633001ac0b21820f230d773631f063cb2f71206`
+`b3d21464e74b5528bc94dae8da406702c7ca4ada`
 
 Task: `llm-openai-client-v1`（OpenAI-compatible LLM Client v1）
 
@@ -13,22 +13,22 @@ Task: `llm-openai-client-v1`（OpenAI-compatible LLM Client v1）
 
 ## Owner Decision
 
-REJECTED
+ACCEPTED
 
 ## Decision Evidence
 
-Owner 明确原文："当前暂不 ACCEPT T01 的 Review Target"，"我认可 Cleaner 对 CL-001、CL-002 的验证结果，但要求在最终接受前修复以下问题"。
+Owner 明确回复 `ACCEPT`，针对 `b3d21464e74b5528bc94dae8da406702c7ca4ada` 这一 CLEAN snapshot（`review.target`）的接受请求。
 
-适用范围与条件：
+决策序列（同一 OwnerGate Session）：
 
-1. 本轮不接受的仅是 `5633001ac0b21820f230d773631f063cb2f71206` 这个 snapshot 的最终接受；CL-001 / CL-002 两项核心机制的验证结论 Owner 已认可，无需重新解释。
-2. `CLEAN-002`（`choices[].message` 缺失或为 `null` 被解析为合法空 assistant 成功响应）要求修复，在现有 T01 Scope 内由 Coder 处理，修复要求：
-   - 缺失 / `null` 的完整 assistant message 必须返回明确的 Provider 协议错误（`provider_failure`）；
-   - 新增回归测试证明该异常响应不会被解析为成功；
-   - 保持合法 Tool Calling 响应兼容，包括 `message` 对象存在、`content = null` 但含有效 `tool_calls`；
-   - 不引入额外 API 请求或自动重试，不调用真实付费模型。
-3. `CLEAN-001`（BaseURL 携带 query / fragment 被静默丢弃）本轮暂缓，作为 P3 保留，不要求修复，不扩大 Scope。
-4. 修复必须形成新的 Implementation Evidence Commit，并由 Cleaner 针对新版本复审重新取得 `CLEAN`；不得沿用 `5633001` 的审查结论。
-5. 不得提前标记 `ACCEPTED`，不得绕过 Cleaner 复审，不得合并到 `develop`。
+1. 上一轮 `5633001ac0b21820f230d773631f063cb2f71206`：Owner 明确"暂不 ACCEPT"，要求先修复 `CLEAN-002`（`choices[].message` 缺失或为 `null` 被当作空 assistant 成功响应）。该决定已记录为 `REJECTED`，其 CLEAN 已作废。
+2. Coder 在现有 T01 Scope 内修复 `CLEAN-002` 形成新 Implementation Evidence Commit `b3d2146`（`wire.go` 指针解码 + `nil` 拒绝，新增两条回归用例，保留 `content: null` + 有效 `tool_calls` 兼容）。
+3. Cleaner 针对 `b3d2146` 重新复审取得 `CLEAN`；`CLEAN-002` 已 `CLOSED`，`owner-gate-start` Gate PASS。
+4. Owner 对 `b3d2146` 回复 `ACCEPT`。
 
-`owner.review_target` 保持为空：本轮未接受任何 snapshot。
+适用范围：
+
+- 接受对象仅为上述 `review.target` snapshot，不是对任务抽象的接受。
+- `CL-001` 与 `CL-002` 两项核心机制的验证结论已被 Owner 认可。
+- `CLEAN-001`（P3，BaseURL 携带 query / fragment 被静默丢弃）保持 `OPEN`，Owner 已明确本轮暂缓、不扩大 Scope，不属于本次接受的修复范围。
+- 本决定不包含任何 `develop` 合并授权；集成时机与方式仍由 Owner 单独决定。
