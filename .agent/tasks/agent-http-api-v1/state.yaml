@@ -2,8 +2,8 @@ schema_version: 3
 task_id: agent-http-api-v1
 
 contract:
-  status: PENDING
-  target: ""
+  status: APPROVED
+  target: "46d871d"
 
 resources:
   reservations: {}
