@@ -13,8 +13,8 @@ review:
   target: "92068976d73d29384c9227fc90d648fb3ddb3261"
 
 owner:
-  status: PENDING
-  review_target: ""
+  status: ACCEPTED
+  review_target: "92068976d73d29384c9227fc90d648fb3ddb3261"
 
 delivery:
   status: NOT_RUN
