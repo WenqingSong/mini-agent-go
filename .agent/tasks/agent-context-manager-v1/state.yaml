@@ -2,8 +2,8 @@ schema_version: 3
 task_id: agent-context-manager-v1
 
 contract:
-  status: PENDING
-  target: ""
+  status: APPROVED
+  target: "624a0944c8642cce827447c907799ff1f344bddc"
 
 resources:
   reservations: {}
