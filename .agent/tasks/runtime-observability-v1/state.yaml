@@ -10,7 +10,7 @@ resources:
 
 review:
   status: CHANGES_REQUIRED
-  target: "08cd0ac"
+  target: "8e4d2fd"
 
 owner:
   status: PENDING
