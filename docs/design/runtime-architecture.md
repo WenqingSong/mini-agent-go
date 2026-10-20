@@ -153,6 +153,9 @@ RUNNING ──► COMPLETED        （模型不再要求工具调用）
 | `core/run_test.go` | core | 状态×错误映射与预算校验 |
 | `llm/provider.go` | llm | Provider / Request / Response / Usage / FinishReason |
 | `llm/provider_test.go` | llm | `Response.Validate` 边界 |
+| `llm/openai/client.go` | llm | OpenAI 兼容 `llm.Provider`：配置校验、单次请求、失败语义 |
+| `llm/openai/wire.go` | llm | Chat Completions 请求/响应 wire 结构与字段映射 |
+| `llm/openai/client_test.go` | llm | `httptest` 覆盖请求构造、响应解析与错误注入 |
 | `tool/tool.go` | tool | Tool / Request / Registry |
 | `session/session.go` | session | TodoStatus / Todo / Session / Store |
 | `contextmgr/contextmgr.go` | contextmgr | Request / Result / Manager |
