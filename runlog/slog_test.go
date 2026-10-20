@@ -472,27 +472,67 @@ func recordWithin(t *testing.T, sink Sink, ctx context.Context, ev Event) error 
 	}
 }
 
+// eventSnapshot 是 Event 的深拷贝快照：Data 复制为独立字符串，Error 指针复制为独立的值。
+// 只有独立副本才能在调用前后比较出「原地改写」——直接比较 Event 结构体会共享同一个
+// *core.RunError，指针相等会掩盖错误对象内容被改写（CLEAN-001）。
+type eventSnapshot struct {
+	Kind     EventKind
+	Ref      core.ExecutionRef
+	Step     int
+	CallID   string
+	Summary  string
+	Data     string
+	Duration time.Duration
+	Status   core.RunStatus
+	Error    *core.RunError
+}
+
+// snapshotEvent 复制 Event 的当前内容，供调用前后比较。
+func snapshotEvent(ev Event) eventSnapshot {
+	snapshot := eventSnapshot{
+		Kind:     ev.Kind,
+		Ref:      ev.Ref,
+		Step:     ev.Step,
+		CallID:   ev.CallID,
+		Summary:  ev.Summary,
+		Data:     string(ev.Data),
+		Duration: ev.Duration,
+		Status:   ev.Status,
+	}
+	if ev.Error != nil {
+		copied := *ev.Error
+		snapshot.Error = &copied
+	}
+	return snapshot
+}
+
 // TestRecordIsSideEffectFree 证明写入失败、Handler 异常、ctx 取消与异常载荷都不改变输入，
 // 且不改变 Run 结果（INV-LOG-004 / AC-004）。
 func TestRecordIsSideEffectFree(t *testing.T) {
 	cancelledCtx, cancel := context.WithCancel(context.Background())
 	cancel()
 
+	// 错误文本故意超过 256 字节且含凭据模式：任何「就地脱敏/就地截断」的实现都会改写
+	// 调用方持有的 *core.RunError，从而被下面的快照比较发现。
+	longSecretMessage := "鉴权失败：Bearer " + strings.Repeat("敏感文本", 80)
+	longPlainMessage := strings.Repeat("内部错误信息", 60)
+
+	ref := core.ExecutionRef{SessionID: "session_1", RunID: "run_1"}
 	baseEvent := Event{
 		Kind:     KindToolFinished,
-		Ref:      core.ExecutionRef{SessionID: "session_1", RunID: "run_1"},
+		Ref:      ref,
 		Step:     2,
 		CallID:   "call_1",
 		Summary:  "工具调用结束",
 		Data:     json.RawMessage(`{"name":"echo","is_error":true,"content":"不可复现的正文"}`),
 		Duration: 42 * time.Millisecond,
-		Error:    &core.RunError{Kind: core.KindToolFailure, Op: "tool.execute", Message: "失败", CallID: "call_1"},
+		Error:    &core.RunError{Kind: core.KindToolFailure, Op: "tool.execute", Message: longSecretMessage, CallID: "call_1"},
 	}
 	weirdEvent := Event{
 		Kind:  KindLLMRequest,
 		Ref:   core.ExecutionRef{SessionID: "s", RunID: "r"},
 		Data:  json.RawMessage(`{"model":"` + "\xff" + `","usage":` + strings.Repeat(`{"usage":`, 12) + `"x"` + strings.Repeat(`}`, 12) + `}`),
-		Error: &core.RunError{},
+		Error: &core.RunError{Kind: core.KindInternal, Op: "agent.step", Message: longPlainMessage},
 	}
 
 	tests := []struct {
@@ -541,8 +581,7 @@ func TestRecordIsSideEffectFree(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			before := tt.event
-			beforeData := append(json.RawMessage(nil), tt.event.Data...)
+			before := snapshotEvent(tt.event)
 
 			err := recordWithin(t, tt.sink, tt.ctx, tt.event)
 
@@ -552,37 +591,110 @@ func TestRecordIsSideEffectFree(t *testing.T) {
 			if !tt.wantErr && err != nil {
 				t.Fatalf("不应返回错误：%v", err)
 			}
-			if !reflect.DeepEqual(before, tt.event) {
-				t.Fatalf("Event 被改写：\n调用前：%+v\n调用后：%+v", before, tt.event)
-			}
-			if !bytes.Equal(beforeData, tt.event.Data) {
-				t.Fatalf("Data 字节被改写：\n调用前：%s\n调用后：%s", beforeData, tt.event.Data)
+			if after := snapshotEvent(tt.event); !reflect.DeepEqual(before, after) {
+				t.Fatalf("Event（含 *core.RunError 与 Data 字节）被改写：\n调用前：%+v\n调用后：%+v", before, after)
 			}
 		})
 	}
 
-	// 同一 RunResult 在接入与不接入该 Sink 时逐字段相同。
-	events := []Event{baseEvent, weirdEvent}
+	// 同一 RunResult 在接入与不接入该 Sink 时逐字段相同（CLEAN-002）。
+	// 期望值用独立副本推导；两条真实路径共用同一份事件输入。若 Sink 改写共享的
+	// *core.RunError / Data 字节，接入路径的结论就会与期望值不同。
+	scenarioEvents := []Event{
+		{Kind: KindRunStarted, Ref: ref},
+		{Kind: KindLLMRequest, Ref: ref, Step: 1, Summary: "第一次模型调用"},
+		{Kind: KindLLMResponse, Ref: ref, Step: 1, Summary: "模型要求调用工具"},
+		{Kind: KindToolStarted, Ref: ref, Step: 2, CallID: "call_1"},
+		{Kind: KindToolFinished, Ref: ref, Step: 2, CallID: "call_1", Summary: "工具失败",
+			Error: &core.RunError{Kind: core.KindToolFailure, Op: "tool.execute", Message: longPlainMessage, CallID: "call_1"}},
+		{Kind: KindRunFinished, Ref: ref, Step: 3, Status: core.RunStatusFailed,
+			Error: &core.RunError{Kind: core.KindToolFailure, Op: "tool.execute", Message: "工具失败终止 Run", CallID: "call_1"}},
+	}
 
-	withFailing := runScenario(NewJSONSink(failingWriter{}), events)
-	withoutSink := runScenario(Discard(), events)
-	if !reflect.DeepEqual(withFailing, withoutSink) {
-		t.Fatalf("Run 结果受日志失败影响：\n接入：%+v\n不接入：%+v", withFailing, withoutSink)
+	expected := runScenario(t, Discard(), copyEvents(scenarioEvents))
+	withFailing := runScenario(t, NewJSONSink(failingWriter{}), scenarioEvents)
+	withoutSink := runScenario(t, Discard(), scenarioEvents)
+
+	if !reflect.DeepEqual(withFailing, expected) {
+		t.Fatalf("Run 结果受日志接入影响：\n接入失败 Sink：%+v\n期望：%+v", withFailing, expected)
+	}
+	if !reflect.DeepEqual(withoutSink, expected) {
+		t.Fatalf("Run 结果受日志接入影响：\n不接入 Sink：%+v\n期望：%+v", withoutSink, expected)
+	}
+
+	// 前置校验：期望值必须真的来自事件序列，否则上面的比较会退化成恒真断言。
+	if expected.ExecutionRef != ref {
+		t.Fatalf("Run 结论的 ExecutionRef 未由事件推导：%+v", expected.ExecutionRef)
+	}
+	if expected.LLMCalls != 1 || expected.ToolCalls != 1 {
+		t.Fatalf("Run 计数未由事件序列推导：LLMCalls=%d ToolCalls=%d", expected.LLMCalls, expected.ToolCalls)
+	}
+	if len(expected.Messages) != 2 {
+		t.Fatalf("消息序列未由事件序列推导：%d 条", len(expected.Messages))
+	}
+	if expected.Status != core.RunStatusFailed || expected.Error == nil {
+		t.Fatalf("Run 终态未由事件推导：status=%s error=%v", expected.Status, expected.Error)
+	}
+	if got := expected.Messages[1].ToolResult; got == nil || got.Content != longPlainMessage {
+		t.Fatalf("工具失败消息未携带错误原文，说明结论未读取事件输入：%+v", expected.Messages[1].ToolResult)
 	}
 }
 
-// runScenario 模拟调用方：记录事件（忽略日志错误）并返回该次 Run 的结论。
-func runScenario(sink Sink, events []Event) core.RunResult {
-	for _, ev := range events {
+// copyEvents 深拷贝事件序列，供期望值推导使用，避免原始输入被改写后污染期望。
+func copyEvents(events []Event) []Event {
+	copied := make([]Event, len(events))
+	for i, ev := range events {
+		copied[i] = ev
+		copied[i].Data = append(json.RawMessage(nil), ev.Data...)
+		if ev.Error != nil {
+			cloned := *ev.Error
+			copied[i].Error = &cloned
+		}
+	}
+	return copied
+}
+
+// runScenario 模拟调用方：记录事件（忽略日志错误），并只依据事件序列推导该次 Run 的结论。
+// 结论不依赖 Sink 的实现细节，因此「接入 / 不接入」两条路径的差异只可能来自日志对业务的干扰。
+func runScenario(t *testing.T, sink Sink, events []Event) core.RunResult {
+	t.Helper()
+
+	result := core.RunResult{Status: core.RunStatusRunning}
+	for i, ev := range events {
+		if i == 0 {
+			result.ExecutionRef = ev.Ref
+		}
+		// Sink 契约：调用方必须忽略日志错误，Run 结果不受影响。
 		_ = sink.Record(context.Background(), ev)
+
+		switch ev.Kind {
+		case KindLLMRequest:
+			result.LLMCalls++
+		case KindToolStarted:
+			result.ToolCalls++
+		case KindLLMResponse:
+			result.Messages = append(result.Messages, core.Message{
+				ID:      fmt.Sprintf("msg_%d", len(result.Messages)),
+				Role:    "assistant",
+				Content: []core.ContentPart{{Type: "text", Text: ev.Summary}},
+			})
+		case KindToolFinished:
+			toolResult := &core.ToolResult{CallID: eventCallID(ev), IsError: ev.Error != nil}
+			if ev.Error != nil {
+				// 工具失败的错误描述按业务语义回填到消息里，因此这里会读取共享的错误对象。
+				toolResult.Content = ev.Error.Message
+			}
+			result.Messages = append(result.Messages, core.Message{
+				ID:         fmt.Sprintf("msg_%d", len(result.Messages)),
+				Role:       "tool",
+				ToolResult: toolResult,
+			})
+		case KindRunFinished:
+			result.Status = eventStatus(ev)
+			result.Error = ev.Error
+		}
 	}
-	return core.RunResult{
-		ExecutionRef: core.ExecutionRef{SessionID: "session_1", RunID: "run_1"},
-		Status:       core.RunStatusCompleted,
-		LLMCalls:     2,
-		ToolCalls:    1,
-		Messages:     []core.Message{{ID: "m1", Role: "user", Content: []core.ContentPart{{Type: "text", Text: "你好"}}}},
-	}
+	return result
 }
 
 // TestNewSinkRejectsNilDependencies 证明缺省构造参数不会导致 panic。
