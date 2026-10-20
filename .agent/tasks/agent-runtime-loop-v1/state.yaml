@@ -3,7 +3,7 @@ task_id: agent-runtime-loop-v1
 
 contract:
   status: APPROVED
-  target: 3d9b61b447af44494a98a1882633b345c569be5b
+  target: 4918efa0ec700aebb583e29b575be4e548cb8f45
 
 resources:
   reservations: {}
@@ -23,6 +23,6 @@ delivery:
   develop_base: ""
 
 blocked:
-  active: true
-  by: analyst
-  reason: "AC-007 的前置依赖未交付：需要 session.Turn 的「删除已压缩历史前缀」能力（Owner D2 已批准需求，T04 已集成故须新建最小独立 Session 扩展任务）。Contract 已 APPROVED 并绑定 Design 更新；该前置任务合并进 develop 后才可解除阻塞并交 Coder。"
+  active: false
+  by: ""
+  reason: ""
