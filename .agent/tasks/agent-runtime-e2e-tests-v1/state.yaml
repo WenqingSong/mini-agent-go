@@ -1,0 +1,28 @@
+schema_version: 3
+task_id: agent-runtime-e2e-tests-v1
+
+contract:
+  status: PENDING
+  target: ""
+
+resources:
+  reservations: {}
+
+review:
+  status: NOT_REQUESTED
+  target: ""
+
+owner:
+  status: PENDING
+  review_target: ""
+
+delivery:
+  status: NOT_RUN
+  review_target: ""
+  feature_head: ""
+  develop_base: ""
+
+blocked:
+  active: true
+  by: "TaskBuilder"
+  reason: "前置能力缺口未决：v1 未装配 Todo 端口适配、TokenBudget 固定为 0，Owner 要求的「不同 Session 的 Todo 隔离」与「长历史压缩」不可经 HTTP 验证；需 Owner 在 A（先交付服务装配）/ B（降级到 agent+session 层验收）/ C（并入本任务）中决定后再开工。"
