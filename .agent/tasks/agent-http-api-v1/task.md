@@ -1,4 +1,6 @@
-# Task: Agent Runtime HTTP JSON API（agent-http-api-v1）
+# Task: Agent Runtime HTTP JSON API（agent-http-api-v1，T09）
+
+Task 编号：T09（Owner 2026-10-20 决定；T08 保留给 Todo 端口适配 + 生产 `Summarizer`）。
 
 ## Goal
 
@@ -39,7 +41,7 @@ Design Artifact: `docs/design/http-api.md`（新增：长期 HTTP 对外契约�
 
 判定依据：本任务新增一套跨越单任务、约束后续客户端与部署的长期公开协议（端点、字段、错误码域、中断语义），并新增鉴权与监听安全边界，属于「新增长期公开协议 + 新增安全边界」；新增的 `docs/design/http-api.md` 是新的项目级设计事实载体。因此判为 `NEW` 而不是局部实现细节。
 
-与 Git 历史记录的差异：本 slug 在 2026-10-20 曾有一份已删除的 Contract（commit `ec2072c`），其中 Owner D5 批准的是 `Design Impact = UPDATE`、同样新增 `docs/design/http-api.md`。两种归类指向同一交付物（新增文件 + 同步既有文档），区别仅在分类口径。本文件按 Owner 本次需求的 `NEW` 记录；Analyst 在 Contract 中应就此口径与 Owner 校正，并保证无论取 `NEW` 还是 `UPDATE`，Design Artifact 都在 Scope / AC 内。
+归类口径：Owner 2026-10-20 已裁定本任务按 `task.md` 口径记 `Design Impact = NEW`（Contract D7），交付物为新增 `docs/design/http-api.md` + 同步 `runtime-architecture.md` §2/§3/§12/§14。此前历史 Contract（已删除，commit `ec2072c`）记录的 `UPDATE` 口径**已作废**，不再是待校正事项；Design 已按本口径落库（`b069226`）。
 
 ## Acceptance Criteria
 
@@ -58,7 +60,7 @@ AC-007 / AC-008 的来源：Owner 需求「实施内容」中的「传递客户�
 
 已核实事实（代码与仓库现状）：
 
-- 分层现状：L0 `core`；L1 `llm` / `tool` / `session` / `contextmgr` / `runlog`；L2 `builtin`；L3 `agent` 均已交付。`go list ./...` 当前只有 9 个包，**不存在** `httpapi` / `service` / `cmd` 等入口或装配代码；`docs/design/` 只有 `agent-workflow.md` 与 `runtime-architecture.md`，**不存在** `http-api.md`。
+- 分层现状：L0 `core`；L1 `llm` / `tool` / `session` / `contextmgr` / `runlog`；L2 `builtin`；L3 `agent` 均已交付。`go list ./...` 当前仍是 9 个包，**不存在** `httpapi` / `service` / `cmd` 入口或装配代码（实现尚未开始）；`docs/design/http-api.md` **已存在**（`b069226`），`docs/design/runtime-architecture.md` §2/§3/§12/§14 已按 Contract 同步。
 - `agent.Loop.Run(ctx, RunRequest)` 的入参是 `RunRequest{core.ExecutionRef; core.RunPolicy}`，**不接受用户消息**（`agent/agent.go:63-67`、`:100`）；它内部自己调用 `cfg.Sessions.RunTurn` 取得会话执行权并完成整轮提交（`agent/agent.go:115`）。`agent.Config.Sessions` 是可注入接口 `SessionRunner{RunTurn(ctx, sessionID, fn)}`（`agent/agent.go:34-37`、`:43`），`*session.Manager` 结构匹配。
 - `session.Manager.RunTurn` 在同一会话的执行权内执行回调（`session/manager.go:188`），因此「先提交用户消息再 Run」会留下半轮历史，「外层 `RunTurn` 内再调用 `Loop.Run`」会重入同一会话执行权。用户消息与 Run 如何落在同一 Turn，是本任务实现前必须由 Contract 定稿的装配接缝。
 - `session.Manager` 提供 `Create/Get/Delete/PurgeExpired/RunTurn/Load/Save`（`session/manager.go:66`、`:95`、`:130`、`:146`、`:188`、`:224`、`:233`）；`ManagerConfig{TTL, Now}`（`session/manager.go:16-19`）；会话哨兵 `ErrSessionNotFound` / `ErrSessionExpired` / `ErrSessionExists` 挂在 `*core.RunError.Cause` 上，`errors.Is` 可判。
@@ -70,9 +72,9 @@ AC-007 / AC-008 的来源：Owner 需求「实施内容」中的「传递客户�
 - 工程：根 module `cnb.cool/framework-station/mini-agent-go`，`go 1.24`，零 `require`；`make test` = `go test ./...`；本机 `go1.24.1 linux/amd64`；基线 `go build ./...`、`go vet ./...`、`go test ./...` 全绿。
 - `.agent/workflow.yaml` 的 `resources: {}`，当前无已声明 Shared Resource Kind；本任务不占用任何全局资源（`resources.reservations` 为空），不申请 migration / 错误码域等 Registry 资源。
 - T07 前置已满足：`agent-runtime-loop-v1` 的 `state.yaml` 为 `contract=APPROVED`、`review=CLEAN`、`owner=ACCEPTED`、`delivery=PASS`，并已合并入 `develop`（`6bebdda`）。
-- Git 基线：分支 `feat/agent-http-api-v1`，HEAD `f79e033`，与 `origin/feat/agent-http-api-v1` 一致；`develop`（`6bebdda`）是 HEAD 的祖先；`git status --short` 为空。
-- 本 slug 的历史事实：该分支历史上已有过本任务的 Contract（`9f0613d`、`ec2072c`），并在 `f79e033` 提交中删除了 `.agent/tasks/agent-http-api-v1/` 下全部 artifacts；当前目录内**没有** `contract.md`，因此上述历史 Contract 不是本任务当前的已确认 Contract。历史 Contract 中 Owner 已于 2026-10-20 对 D1–D5 作出书面决定，其要点为：D1 新增最小 `service` 装配层复用当前 Turn、不改 `agent` 公共 API；D2 不实现生产压缩/Todo 工具/生产 `Summarizer`；D3 Git 基线由 Owner 合并后由 TaskBuilder 回写；D4 静态 Bearer 认证 + 服务端请求超时 + 成功响应最小字段；D5 新增 `docs/design/http-api.md` 并同步 `runtime-architecture.md`。这些是 Owner 的既有意图，Analyst 在重新形成 Contract 时应作为输入参考并在 Contract Decision 中重新确认。
-- 编号事实冲突：`docs/design/runtime-architecture.md` §14 把「服务装配任务（T08）」分配给 Todo 端口适配 + 生产 `Summarizer` + Provider 接线；本次 Owner 需求把 `agent-http-api-v1` 称为「Task 08」。历史 Contract 记录 Owner 曾裁定「保留 T07 已批准 Contract 的 T08 归属，本任务另行分配编号（建议 T09）」，但该裁定随 artifacts 删除未留在当前任务事实中。
+- Contract 与 Design 现状：`.agent/tasks/agent-http-api-v1/contract.md` 已存在，Owner `APPROVED`，A1 = `46d871d`（A2 = `4852d9c`）；长期 Design 已按该 Contract 落库（新增 `docs/design/http-api.md`，同步 `runtime-architecture.md` §2/§3/§12/§14，commit `b069226`）。本 slug 的历史 Contract（`9f0613d`、`ec2072c`）已被删除，不作为当前依据。
+- 编号现状：`docs/design/runtime-architecture.md` §14 的 T08 保留给 Todo 端口适配 + 生产 `Summarizer`；本任务编号为 T09（Owner 2026-10-20 决定），两者不得混同。
+- Git 基线：分支 `feat/agent-http-api-v1`，基线 HEAD `4852d9c`（完整 SHA 见 Review Baseline），与 `origin/feat/agent-http-api-v1` 一致；`develop`（`6bebdda`）是 HEAD 的祖先；`git status --short` 为空。
 
 Assumption：
 
@@ -83,11 +85,11 @@ Assumption：
 
 OPEN QUESTION（均不阻塞本任务定义，但必须在 Coder 开始实现前由 Analyst 定稿、必要时由 Owner 决定）：
 
-1. 装配接缝：如何在**不修改** `agent.Loop.Run` 公共 API 的前提下，让用户消息与 Agent 产出落在同一次 `session.Manager.RunTurn` 内（历史 D1 选择新增最小装配层；若 Analyst 判定必须改 `agent` 公共 API，属 Scope 扩张，回 Owner）。
-2. 编号与 Design Impact 口径：本任务称「Task 08」与 §14 既有 T08 归属（Todo 适配 + 生产 `Summarizer`）冲突；本文件按 Owner 需求记 `Design Impact = NEW`，历史 D5 为 `UPDATE`。需在 Contract 期与 Owner 校正，并确保 Design/§14 不把两者混同。
-3. 认证凭证形态（环境变量静态凭证或其他注入方式）、`/healthz` 是否免认证、「非回环监听 + 无凭证」的 fail-closed 具体行为，涉及安全边界，需 Owner 在 Contract Decision 中确认。
-4. 请求级超时的来源与取值、宽限期取值、客户端断开且响应已不可达时的证据口径（终态 + 日志）。
-5. 会话不存在时的预检与 TOCTOU：HTTP 层是否在调用 Run 前先 `Get` 一次会话（影响「无效会话不执行 Run」的可观察性定义）。
+1. 装配接缝：如何在**不修改** `agent.Loop.Run` 公共 API 的前提下，让用户消息与 Agent 产出落在同一次 `session.Manager.RunTurn` 内（历史 D1 选择新增最小装配层；若 Analyst 判定必须改 `agent` 公共 API，属 Scope 扩张，回 Owner）。状态：已由 APPROVED Contract 定稿（见 `contract.md`「Selected Design」D1 与「Business Invariants」）：新增 `service` 装配层 + 同 Turn 适配器，`agent` 公共 API 零改动；一次 chat 恰好一次真实 `RunTurn`，不嵌套取执行权、非 `COMPLETED` 不提交半轮历史。
+2. 编号与 Design Impact 口径：本任务称「Task 08」与 §14 既有 T08 归属（Todo 适配 + 生产 `Summarizer`）冲突；本文件按 Owner 需求记 `Design Impact = NEW`，历史 D5 为 `UPDATE`。需在 Contract 期与 Owner 校正，并确保 Design/§14 不把两者混同。状态：已由 APPROVED Contract 定稿（见 `contract.md`「Owner Decision Record」D7）：本任务编号 T09、`Design Impact = NEW`，T08 保留给 Todo 适配 + 生产 `Summarizer`，Design 已按此落库。
+3. 认证凭证形态（环境变量静态凭证或其他注入方式）、`/healthz` 是否免认证、「非回环监听 + 无凭证」的 fail-closed 具体行为，涉及安全边界，需 Owner 在 Contract Decision 中确认。状态：已由 APPROVED Contract 定稿（见 `contract.md`「Selected Design」D4 / D6 与「认证与监听」段）。
+4. 请求级超时的来源与取值、宽限期取值、客户端断开且响应已不可达时的证据口径（终态 + 日志）。状态：已由 APPROVED Contract 定稿（见 `contract.md`「Selected Design」D5：请求超时 60s → `deadline_exceeded` + `504`、宽限期 10s，客户端断开只要求内部 `cancelled` 语义成立、不承诺 `408` 可达）。
+5. 会话不存在时的预检与 TOCTOU：HTTP 层是否在调用 Run 前先 `Get` 一次会话（影响「无效会话不执行 Run」的可观察性定义）。状态：已由 APPROVED Contract 定稿（见 `contract.md`「请求处理顺序」第 5、7 步与 INV-H03：先 `SessionStore.Get` 预检，`Runner` 返回的会话哨兵映射为同一 code）。
 
 ## Verification
 
@@ -120,11 +122,11 @@ COMPLEX
 
 ## Review Baseline
 
-- Base commit：`f79e033`（`chore(agent): 移除 agent-http-api-v1 任务目录下全部契约与状态文件`）。当前分支 `feat/agent-http-api-v1` 指向 `f79e033`，与 `origin/feat/agent-http-api-v1` 一致；`develop`（`6bebdda`）是 HEAD 的祖先。
+- Base commit：`4852d9ce2e5c84e592431ce857b770bd2de8aa9a`（`chore(agent): 绑定 Contract 批准证据 A1=46d871d`）。该基线**含 T07 已交付实现**（`agent/**` 已在分支内）与**已批准 Contract**（A1 = `46d871d`）及**已落库 Design**（`b069226`）。当前分支 `feat/agent-http-api-v1` 从该基线出发，与 `origin/feat/agent-http-api-v1` 一致；`develop`（`6bebdda`）是 HEAD 的祖先。
 - 任务开始时已有修改：无。`git status --short` 为空，工作区 clean，无未跟踪文件；基线 `go build ./...`、`go vet ./...`、`go test ./...` 全绿。
-- 历史遗留的区分方式：本分支在 `9f0613d` / `ec2072c` 曾提交过本任务 Contract，`f79e033` 已将其全部删除。这些历史内容不属于当前交付物，也不能被 Cleaner 当作「已确认 Contract」；需要参考时以 Git 历史为证据并在 findings / contract 中显式引用。
-- 重叠修改的区分方式：TaskBuilder 只拥有 `.agent/tasks/agent-http-api-v1/{task.md,state.yaml,findings.md,core-logic.md,owner-decision.md,delivery.md}`；`contract.md` 由 Analyst 维护；新包与测试由 Coder 在独立 commit 引入；`docs/design/*` 由 Analyst 在 Contract `APPROVED` 后更新；`agent/**` 与 L0–L2 不在本任务修改范围。发现他人遗留 dirty 文件 → STOP，不 `git add -A` / `git add .`、不 stash、不覆盖。
+- 历史遗留的区分方式：本分支 `9f0613d` / `ec2072c` 记录的历史 Contract 已被 `f79e033` 删除，不属于当前交付物；**当前 Contract 以 `46d871d`（A1）为准**，Cleaner 不得把已删除的历史内容当作已确认 Contract。需要参考历史时以 Git 历史为证据，并在 findings / contract 中显式引用。
+- 重叠修改的区分方式：`task.md` 由 TaskBuilder 维护；`contract.md` 由 Analyst 维护（A1 = `46d871d` 之后不得再改，任何改动都会使 Contract Approval 失效）；`docs/design/*` 由 Analyst 维护；`state.yaml` 的 contract/review/owner/delivery 字段由对应角色机械持久化。Coder 只能新增 `httpapi/**`、`service/**`、`cmd/mini-agent/**` 及其测试（文件清单以 APPROVED Contract 为准），不改 `agent/**` 与 L0–L2。发现他人遗留 dirty 文件 → STOP，不 `git add -A` / `git add .`、不 stash、不覆盖。
 
 ## Initial Route
 
-交 Analyst（COMPLEX，`contract.status = PENDING`）。
+Contract 已 `APPROVED`（A1 = `46d871d`，`contract.target = 46d871d`），长期 Design 已落库（`b069226`）；TaskBuilder 已完成 T09 编号与 Review Baseline 同步。下一步：由 Analyst 复核 Contract ↔ `task.md` 一致性并重跑 `coder-start` Gate，Gate 实际 `PASS` 后才 HANDOFF Coder。
