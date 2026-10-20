@@ -167,6 +167,8 @@ RUNNING ──► COMPLETED        （模型不再要求工具调用）
 | `contextmgr/estimator.go` | contextmgr | Estimator / HeuristicEstimator |
 | `contextmgr/summarizer.go` | contextmgr | SummarizeRequest / Summarizer |
 | `contextmgr/manager.go` | contextmgr | NewManager 与构建/压缩逻辑 |
+| `contextmgr/estimator_test.go` | contextmgr | `Estimator` / `HeuristicEstimator` 边界 |
+| `contextmgr/manager_test.go` | contextmgr | `Build` 的预算、保留、原子单元与失败语义 |
 | `runlog/runlog.go` | runlog | EventKind / Event / Sink / Discard |
 | `runlog/runlog_test.go` | runlog | `Discard` 无副作用 |
 
