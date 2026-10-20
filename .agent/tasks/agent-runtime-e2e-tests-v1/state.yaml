@@ -2,8 +2,8 @@ schema_version: 3
 task_id: agent-runtime-e2e-tests-v1
 
 contract:
-  status: PENDING
-  target: ""
+  status: APPROVED
+  target: "0462b5f2e783f9d9340a6ea629b76aa2869c40e8"
 
 resources:
   reservations: {}
