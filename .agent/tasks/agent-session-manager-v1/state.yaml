@@ -1,0 +1,28 @@
+schema_version: 3
+task_id: agent-session-manager-v1
+
+contract:
+  status: APPROVED
+  target: 5263d2fc87d739ab524f2b9db73b74dd0ef30e5d
+
+resources:
+  reservations: {}
+
+review:
+  status: CLEAN
+  target: f23082ad0c25a65317cffe27ca91982dd437ed3f
+
+owner:
+  status: ACCEPTED
+  review_target: f23082ad0c25a65317cffe27ca91982dd437ed3f
+
+delivery:
+  status: PASS
+  review_target: f23082ad0c25a65317cffe27ca91982dd437ed3f
+  feature_head: 0750cb2f2a27a42bfd02bf878d5ce5d420d4590d
+  develop_base: 6902d2445665ec356a2db22b33b7749d39d8018e
+
+blocked:
+  active: false
+  by: ""
+  reason: ""

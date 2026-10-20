@@ -16,7 +16,7 @@
 L0  core          公共契约：消息、工具调用、运行状态、错误、配对与校验（仅标准库）
 L1  llm           LLM Provider 接口
     tool          Tool / Registry 接口
-    session       Session / Todo 存储接口
+    session       Session / Todo / 摘要 类型与内存 Session Manager
     contextmgr    上下文预算、窗口与压缩接口
     runlog        运行日志 Sink
 L2  builtin       内置工具实现：calculator / mock_search / todo_create / todo_list / todo_complete
@@ -48,7 +48,7 @@ go list -f '{{.ImportPath}} {{join .Imports " "}}' ./...
 | `core` | 统一消息模型、工具调用/结果与配对规则、工具元数据、运行状态与策略、统一错误类型、可独立验证的纯校验 | I/O、日志、调度、Provider 细节 |
 | `llm` | 一次 LLM 调用的请求/响应契约与 `Provider` 接口 | HTTP、鉴权、流式、重试、限流、Token 估算 |
 | `tool` | `Tool` 执行契约、工具元数据、`Registry` 查找 | 具体工具实现、沙箱、权限、并发调度 |
-| `session` | Session / Todo 数据类型与 `Store` 存取抽象 | 任何持久化实现、内存实现、迁移 |
+| `session` | Session / Todo / 摘要数据类型、`Store` 抽象，以及单进程内存 Session Manager（会话生命周期、Turn 执行权与原子提交、过期清理、Todo 生命周期） | 持久化实现、跨进程锁与多副本一致性、摘要生成算法、Agent Loop 调度 |
 | `builtin` | 五个内置工具（`calculator`、`mock_search`、`todo_create`、`todo_list`、`todo_complete`）、固定有序 Mock 数据集、`TodoOperations` 写入端口与领域错误码 | `tool.Registry` 实现、工具调度与失败回填、Todo 存储 / ID 生成 / 生命周期、网络与第三方 SDK |
 | `contextmgr` | 上下文预算、窗口选择与压缩的契约 | 具体压缩算法、tokenizer、消息存储 |
 | `runlog` | 运行事件模型与 `Sink` 接口 | 落盘格式、采样、上报后端 |
@@ -115,10 +115,20 @@ RUNNING ──► COMPLETED        （模型不再要求工具调用）
 
 ## 8. 会话归属与工具身份
 
-- Session 是消息历史与 Todo 的**唯一所有者**；Run 只是通过 `ExecutionRef{SessionID, RunID}` 引用会话。
+- Session 是消息历史、摘要与 Todo 的**唯一所有者**；Run 只是通过 `ExecutionRef{SessionID, RunID}` 引用会话。
 - 工具执行身份通过显式参数传递（`tool.Request` 内嵌 `ExecutionRef` + `core.ToolCall`），不使用 `context.Value` 承载业务身份；`context.Context` 只承担取消与超时。
 - 不向 Tool 传递可变的 `Session`、`Todo` 或 `Store`：Tool 若需要会话状态，必须由装配层显式注入能力或传入值，避免工具绕过运行时直接改写会话状态。
-- 会话持久化是后续任务；本层只固定 `Store` 抽象（`Load` / `Save`），不实现任何存储。
+- 注入会话能力时使用受限接口而不是数据副本：Todo 的读写能力是 `session.TodoOperations`（由 `*Turn` 实现），摘要写入是 `Turn.SetSummary`。注入的是能力接口，不违反 INV-005。
+
+### 8.1 内存 Session Manager（`session` 模块内的单进程实现）
+
+- 事实源：`session.Manager` 在进程内存中持有会话，是 `session.Session` 的唯一写入口；`Store`（`Load` / `Save`）由 `*Manager` 实现。**无持久化**：进程退出即丢失，重启恢复属后续任务。摘要属于 Session 数据，由 Context Manager 生成/更新，Manager 只负责存储。
+- 执行权：每个会话一把**可被 `context` 取消的**执行权（容量 1 的信号量），同一会话的 Turn 串行，不同会话互不阻塞；禁止跨会话全局锁，`map` 锁不得跨越调用方回调持有。
+- Turn 与提交：`Manager.RunTurn` 在会话执行权内执行调用方回调，回调通过 `*Turn` 写入**隔离暂存区**（消息、摘要、Todo）；只有「`ctx` 未取消 + 回调成功 + Turn 仍打开 + 会话仍是当前 entry + 提交前校验通过」才整体提交。失败、取消、超时、panic 都不产生部分提交，也不刷新 TTL。
+- 读取隔离：`Get` / `Load` / `Turn.Session` / `Turn.Todos` 返回深拷贝快照，调用方修改不影响会话；Turn 内的读取看到「已提交 + 本 Turn 已暂存」的视图（read-your-writes）。
+- 生命周期：TTL 由配置提供，创建与**成功提交**刷新，普通读取不续期；无后台清理 goroutine，过期判定为惰性访问 + 显式 `PurgeExpired`。过期以「能取得执行权且已过 TTL」为唯一判定，因此正在执行的 Turn 不被清理破坏；过期即物理删除。
+- 重入约束：Turn 内运行的 Tool / Context Manager 只能使用注入的 Turn 能力，**不得持有 `*Manager` 并回调其 `RunTurn` / `Delete` / `Save`**（会重入同一会话执行权而死锁）。
+- 会话级错误：不存在 / 已过期 / 重复创建用 `session` 包哨兵（`ErrSessionNotFound` / `ErrSessionExpired` / `ErrSessionExists`）+ `*core.RunError{Kind: KindInvalidArgument}` 表达，调用方用 `errors.Is` 细分；不新增 `core.ErrorKind`，也不构成 Run 终态。
 
 内置工具侧的落地规则（`builtin`）：
 
@@ -133,6 +143,7 @@ RUNNING ──► COMPLETED        （模型不再要求工具调用）
 - 职责边界：决定“送进 LLM 的消息视图”——token 预算、窗口选择、压缩。
 - 契约只暴露 `Request{Messages, TokenBudget, KeepRecent}` 与 `Result{Messages, Compacted, DroppedMessages}`；token 估算与压缩算法属后续任务。
 - 输出视图仍必须是合法的配对序列（不得因截断产生孤儿 Result），否则装配层必须报 `invalid_pairing` 而不是把非法消息发给 Provider。
+- 摘要（`session.Session.Summary`）由 Session 持有：Context Manager 只负责生成与更新（经 Turn 能力写入，随 Turn 原子提交），不自行维护一份摘要状态。
 
 ## 10. 运行日志（runlog）
 
@@ -148,7 +159,7 @@ RUNNING ──► COMPLETED        （模型不再要求工具调用）
 | INV-002 | 配对完整性：Call 与 Result 一一对应，非法配对必须报 `invalid_pairing` | 表驱动测试（0/1/N 调用 + 三类非法配对） |
 | INV-003 | 状态/错误逐状态一致（`RUNNING`、`COMPLETED` 无错误；三个失败终态必须带匹配 Kind） | 映射表正反用例 |
 | INV-004 | 双预算：两个上限都必须为正，计数值不越界，触限只能 `LIMIT_EXCEEDED` | 策略校验 + 映射测试 |
-| INV-005 | 会话归属：Session 独占消息与 Todo，Tool 只拿 ID 或受限能力接口（不持会话状态副本） | 签名核对 + 工具层测试（运行期证据归 Session Manager / 装配任务） |
+| INV-005 | 会话归属：Session 独占消息、摘要与 Todo，Tool 只拿 ID 或受限能力接口（不持会话状态副本） | 签名核对 + 能力注入约束（`session.TodoOperations` 由 `*Turn` 实现，见 §8.1）+ 工具层测试（运行期证据归 Agent Loop 集成 / 装配任务） |
 | INV-006 | 取消/超时只能 `CANCELLED`，靠 Kind 区分 | 映射测试（运行期中断行为归 Loop 任务） |
 | INV-007 | 可恢复工具失败回填继续；不可恢复才 `FAILED + tool_failure` | 映射测试（单工具级分类见 INV-010，跨 step 决策归 Loop 任务） |
 | INV-008 | 日志旁路：Sink 失败不改变 Run 结果 | `Discard` 副作用测试（运行期旁路归 Loop 任务） |
@@ -173,6 +184,21 @@ RUNNING ──► COMPLETED        （模型不再要求工具调用）
 | INV-B07 | 无生产存储：`builtin` 生产代码不含 Todo 存储或 ID 生成；端口实现只出现在测试与后续装配任务 | 代码核对 |
 | INV-B08 | 依赖方向：`builtin` 只 import 标准库 + `core` / `tool` / `session`；`core/**`、`tool/tool.go`、`session/session.go` 未变 | `go list` + `git diff` |
 | INV-B09 | Schema 子集：五个 `Parameters` 只用 `type` / `properties` / `description` / `enum` / `required` | 机械遍历 schema 键集合 |
+
+### 11.1 会话管理不变量（`session` 内存实现）
+
+来源：`agent-session-manager-v1` 的 APPROVED `contract.md`（该 Contract 内编号 INV-001—INV-008 依次对应下表 INV-009—INV-016；Contract INV-009「分层与模型稳定」由本表 INV-001 与 §3 职责共同覆盖）。
+
+| 编号 | 不变量 | 运行期证据 |
+| --- | --- | --- |
+| INV-009 | 提交原子性：一次 Turn 的消息、摘要与 Todo 变更要么整体生效、要么整体不生效 | 失败/取消/超时/panic 用例断言历史与内容哈希不变 |
+| INV-010 | 会话串行：同一会话至多一个 Turn 执行回调；提交后消息组连续不交错，总数等于各成功 Turn 之和 | 并发写入测试（`-race -count=5`）+ 分组连续性扫描 |
+| INV-011 | 跨会话独立：无跨会话全局锁，不同会话可同时执行，一个会话的变更/删除/过期不影响其他会话 | 双 Turn 交叉同步点测试 + 可逆 mutation（改成全局锁必须失败） |
+| INV-012 | 读隔离与明确失败：读取返回深拷贝快照；不存在/已过期用哨兵错误表达并可 `errors.Is` 区分 | 读写隔离、`errors.Is` 表驱动 |
+| INV-013 | 校验原子：非法消息序列或非法 Todo 被拒绝时历史与 Todo 列表逐条不变 | 孤儿/缺失 Result、非法 Todo 的表驱动 + 前后哈希比对 |
+| INV-014 | 执行权不泄漏：正常、错误、取消、超时、过期、删除、panic 路径都释放执行权 | 取消/超时后新请求能取得执行权；panic 用例 |
+| INV-015 | 过期不破坏在途 Turn：以「可取得执行权 + 超过 TTL」判定过期；成功提交刷新 TTL，失败/取消不刷新 | 注入时钟 + 并发 `PurgeExpired` 测试 |
+| INV-016 | Todo 单一事实源与暂存可见性：正式 Todo 只有 `Session.Todos` 一份；Turn 内后续操作能看到未提交修改；Turn 关闭后写入被拒 | `PutTodo` 后立即读、关闭后写入用例 |
 
 ## 12. 文件所有权
 
@@ -203,7 +229,15 @@ RUNNING ──► COMPLETED        （模型不再要求工具调用）
 | `tool/validate_test.go` | tool | Schema fail-closed 与参数校验表驱动 |
 | `tool/executor_test.go` | tool | 执行结果、失败归类、去重范围与 goroutine 收敛 |
 | `tool/fake_test.go` | tool | Fake Tool 与测试辅助（调用计数、watchdog、请求构造） |
-| `session/session.go` | session | TodoStatus / Todo / Session / Store |
+| `session/session.go` | session | TodoStatus（含四个导出常量）/ Todo 与 `Todo.Validate` / Session（含 `Summary`）/ Store |
+| `session/manager.go` | session | ManagerConfig / Manager / Create·Get·Delete·PurgeExpired·RunTurn / 会话执行权 |
+| `session/turn.go` | session | Turn / TodoOperations 实现 / 暂存视图与原子提交 |
+| `session/errors.go` | session | ErrSessionNotFound / ErrSessionExpired / ErrSessionExists |
+| `session/manager_test.go` | session | 会话 CRUD 与隔离、Store 适配、不存在/重复创建错误 |
+| `session/turn_test.go` | session | 提交条件、暂存可见性、非法拒绝原子性、Turn 关闭、panic |
+| `session/concurrency_test.go` | session | 同会话串行、跨会话并发、无跨会话全局锁 |
+| `session/expiry_test.go` | session | TTL 续期、惰性过期、`PurgeExpired` 与在途 Turn |
+| `session/cancel_test.go` | session | 排队取消/超时、执行中取消、执行权释放 |
 | `builtin/builtin.go` | builtin | 包文档 / 工具名与错误码常量 / 成功与失败 Content 编码 / 参数解码与会话字段拒绝 |
 | `builtin/calculator.go` | builtin | `calculator` 工具实现 |
 | `builtin/search.go` | builtin | `mock_search` 工具实现 |
@@ -236,11 +270,13 @@ RUNNING ──► COMPLETED        （模型不再要求工具调用）
 未验证：
 
 - `cnb.cool/framework-station/mini-agent-go` 的外部 `go get` 可用性。
-- INV-005 / INV-006 / INV-007 / INV-008 的运行期行为（T00 只有签名、映射函数与契约级测试）。
+- INV-006 / INV-007 / INV-008 的运行期行为（T00 只有签名、映射函数与契约级测试）；INV-005 现由 §8.1 的能力注入约束与 `session` 测试补充证据。
 - INV-009—INV-013 只有 `tool` 包单元测试证据，尚未在 Agent Loop 中集成验证（集成与终态映射归 Agent Loop 任务）。
-- INV-B05 / INV-B06 的真实会话隔离、跨会话不可写、Todo 生命周期与持久化并发：`builtin` 只有测试专用 Fake 证据，运行期证据归 Session Manager 与装配层。
+- INV-B05 / INV-B06 的真实会话隔离、跨会话不可写、Todo 生命周期与持久化并发：`builtin` 只有测试专用 Fake 证据，运行期证据归 Agent Loop 集成与装配层。
 - Todo 端到端行为（模型发起 `todo_*` 调用到真实 Todo 落库）：需要 T07 把 `session.TodoOperations` 适配成 `builtin.TodoOperations` 后才可验证。
 - `contextmgr.Request.TokenBudget` 的实际语义需要 tokenizer 支撑，尚未实现。
+- `-race` 与 `go test -race` 未进入 CI（`.cnb.yml` 只有 `make test`），会话并发不变量依赖本地/审查时人工执行。
+- `session` 内存实现无持久化，进程重启数据丢失是既定行为，不做恢复验证。
 
 归属后续任务：
 
@@ -249,7 +285,7 @@ RUNNING ──► COMPLETED        （模型不再要求工具调用）
 | 取消/超时在 Loop 中的实际中断点与消息保留策略 | Agent Loop 任务 |
 | 跨 step 的 `RunStatus` 终态映射、是否继续/重试决策、同 step 多调用顺序与并发 | Agent Loop 任务 |
 | runlog 旁路在真实运行时成立、事件完整性 | Agent Loop 任务 |
-| `session.Store` 的内存与持久化实现、Todo 生命周期 | Session 持久化任务 |
+| `session.Store` 的持久化实现（DB / Redis）、重启恢复与数据迁移 | Session 持久化任务 |
 | `builtin.TodoOperations` 的适配实现、Todo ID 生成、状态迁移、`ErrTodoNotFound` 映射 | 装配层任务（T07） |
 | `session.TodoOperations` 与 `builtin.TodoOperations` 两套端口的集成、真实会话隔离与 Todo 端到端验收 | 装配层 + 集成验收 |
 | token 预算、窗口截断、压缩算法 | Context 任务 |
