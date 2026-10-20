@@ -2,6 +2,7 @@ package contextmgr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -40,9 +41,10 @@ func NewManager(estimator Estimator, summarizer Summarizer) (Manager, error) {
 
 // Build 构建一次 LLM 调用所需的消息视图。
 //
-// 成功时 Result.Messages 必过 core.ValidateMessages，且按注入估算器求和不超 TokenBudget
-// （TokenBudget <= 0 表示不限制）；压缩只覆盖 req.Messages 的严格前缀。任何错误路径返回
-// 零值 Result，不返回超预算或配对非法的部分视图，调用方不得据此修改持久化状态。
+// 成功时 Result.Messages 必过 core.ValidateMessages，保留的近期消息不少于 KeepRecent 条，
+// 且按注入估算器求和不超 TokenBudget（TokenBudget <= 0 表示不限制）；压缩只覆盖
+// req.Messages 的严格前缀。任何错误路径返回零值 Result，不返回超预算、配对非法或
+// 突破 KeepRecent 保留下限的部分视图，调用方不得据此修改持久化状态。
 func (m *manager) Build(ctx context.Context, req Request) (Result, error) {
 	if err := validateRequest(req); err != nil {
 		return Result{}, err
@@ -97,86 +99,77 @@ func (m *manager) Build(ctx context.Context, req Request) (Result, error) {
 			fmt.Sprintf("TokenBudget 无法满足：KeepRecent=%d 的保留目标下没有可压缩的更早历史", req.KeepRecent))
 	}
 
-	// 逐单元吞并：每轮把保留尾部中最老的一个 Unit 并入压缩集合，直到视图满足预算。
-	// Summarizer 调用上限为 unitCount + 1；每轮至少并入一个 Unit，保留条数严格减少，
-	// 不可能无限循环。
-	maxSummarizeCalls := len(units) + 1
-	summarizeCalls := 0
-	for compactEnd := tailStart; ; compactEnd++ {
-		if summarizeCalls >= maxSummarizeCalls {
-			return Result{}, core.NewError(core.KindInternal, opBuild,
-				"压缩无法取得有效进展：Summarizer 调用次数超过单次 Build 上限")
-		}
-		if err := contextError(ctx); err != nil {
-			return Result{}, err
-		}
+	// KeepRecent 是保留条数的硬下限（Owner D3 / AC-002）：tailStart 已是满足
+	// 「保留条数 >= KeepRecent」的最小尾部单元集合，再吞并任何单元都会让保留条数少于
+	// KeepRecent。因此只压缩 units[:tailStart] 一次；System Prompt + 新摘要 + 保留尾部
+	// 仍超预算时显式失败，不通过继续减少保留条数来凑预算（不降级、不返回部分记忆）。
+	if err := contextError(ctx); err != nil {
+		return Result{}, err
+	}
 
-		summary, err := m.summarizer.Summarize(ctx, SummarizeRequest{
-			ExecutionRef:    req.ExecutionRef,
-			PreviousSummary: req.PreviousSummary,
-			Messages:        concatUnits(units[:compactEnd]),
-		})
-		summarizeCalls++
-		if err != nil {
-			return Result{}, &core.RunError{
-				Kind:    core.KindInternal,
-				Op:      opBuild,
-				Message: "Summarizer 压缩历史失败",
-				Cause:   err,
-			}
-		}
-		if strings.TrimSpace(summary) == "" {
-			return Result{}, core.NewError(core.KindInternal, opBuild,
-				"Summarizer 返回空摘要或全空白摘要，不得以占位文本冒充完整记忆")
-		}
+	retained := concatUnits(units[tailStart:])
+	summary, err := m.summarizer.Summarize(ctx, SummarizeRequest{
+		ExecutionRef:    req.ExecutionRef,
+		PreviousSummary: req.PreviousSummary,
+		Messages:        concatUnits(units[:tailStart]),
+	})
+	if err != nil {
+		return Result{}, summarizeError(ctx, err)
+	}
+	// 摘要期间 ctx 也可能被取消/超时：此时不返回成功视图，保持取消/超时语义。
+	if err := contextError(ctx); err != nil {
+		return Result{}, err
+	}
+	if strings.TrimSpace(summary) == "" {
+		return Result{}, core.NewError(core.KindInternal, opBuild,
+			"Summarizer 返回空摘要或全空白摘要，不得以占位文本冒充完整记忆")
+	}
 
-		newSummaryMsg, _ := systemTextMessage(summary)
-		summaryTokens, err := m.estimateMessage(newSummaryMsg)
-		if err != nil {
-			return Result{}, err
-		}
-		if summaryTokens > req.TokenBudget {
-			// 摘要单独即超预算：任何包含它的视图都不可能满足预算。
-			return Result{}, core.NewError(core.KindInvalidArgument, opBuild,
-				"TokenBudget 无法满足：摘要本身的估算值超出预算")
-		}
+	newSummaryMsg, _ := systemTextMessage(summary)
+	summaryTokens, err := m.estimateMessage(newSummaryMsg)
+	if err != nil {
+		return Result{}, err
+	}
+	if summaryTokens > req.TokenBudget {
+		// 摘要单独即超预算：任何包含它的视图都不可能满足预算。
+		return Result{}, core.NewError(core.KindInvalidArgument, opBuild,
+			"TokenBudget 无法满足：摘要本身的估算值超出预算")
+	}
 
-		// 组装候选视图：System Prompt + 新摘要 + 保留尾部，旧摘要由新摘要整体替换。
-		candidate := make([]core.Message, 0, len(units)-compactEnd+2)
-		if hasSystem {
-			candidate = append(candidate, systemMsg)
-		}
-		candidate = append(candidate, newSummaryMsg)
-		candidate = append(candidate, concatUnits(units[compactEnd:])...)
+	// 组装视图：System Prompt + 新摘要 + 保留尾部，旧摘要由新摘要整体替换。
+	candidate := make([]core.Message, 0, len(retained)+2)
+	if hasSystem {
+		candidate = append(candidate, systemMsg)
+	}
+	candidate = append(candidate, newSummaryMsg)
+	candidate = append(candidate, retained...)
 
-		estimate, err := m.estimateView(candidate)
-		if err != nil {
-			return Result{}, err
-		}
-		if estimate <= req.TokenBudget {
-			// 输出前自检：压缩结果必须仍是合法配对序列。
-			if err := core.ValidateMessages(candidate); err != nil {
-				return Result{}, &core.RunError{
-					Kind:    core.KindInternal,
-					Op:      opBuild,
-					Message: "压缩结果未通过 core.ValidateMessages 自检",
-					Cause:   err,
-				}
-			}
-			return Result{
-				Messages:        candidate,
-				Compacted:       true,
-				DroppedMessages: countUnitMessages(units[:compactEnd]),
-				Summary:         summary,
-			}, nil
-		}
+	estimate, err := m.estimateView(candidate)
+	if err != nil {
+		return Result{}, err
+	}
+	if estimate > req.TokenBudget {
+		return Result{}, core.NewError(core.KindInvalidArgument, opBuild,
+			fmt.Sprintf("TokenBudget 无法满足：System Prompt、摘要与 KeepRecent=%d 条近期消息（保留 %d 条）合计超出预算",
+				req.KeepRecent, len(retained)))
+	}
 
-		if compactEnd >= len(units) {
-			// 保留历史已全部压缩，视图仍超预算：无法取得进一步进展。
-			return Result{}, core.NewError(core.KindInternal, opBuild,
-				"压缩无法取得有效进展：保留历史已全部压缩，视图仍超预算")
+	// 输出前自检：压缩结果必须仍是合法配对序列。
+	if err := core.ValidateMessages(candidate); err != nil {
+		return Result{}, &core.RunError{
+			Kind:    core.KindInternal,
+			Op:      opBuild,
+			Message: "压缩结果未通过 core.ValidateMessages 自检",
+			Cause:   err,
 		}
 	}
+
+	return Result{
+		Messages:        candidate,
+		Compacted:       true,
+		DroppedMessages: countUnitMessages(units[:tailStart]),
+		Summary:         summary,
+	}, nil
 }
 
 // validateRequest 校验调用方契约：KeepRecent 非负、Messages 不含 system 角色、
@@ -197,13 +190,40 @@ func validateRequest(req Request) error {
 
 // contextError 把 ctx 的取消/超时映射为对应 Kind，不透传为 internal。
 func contextError(ctx context.Context) error {
+	kind, msg, ok := contextKind(ctx)
+	if !ok {
+		return nil
+	}
+	return core.NewError(kind, opBuild, msg)
+}
+
+// contextKind 识别 ctx 的取消/超时终态，返回对应 ErrorKind 与中文说明。
+func contextKind(ctx context.Context) (core.ErrorKind, string, bool) {
 	switch ctx.Err() {
 	case context.Canceled:
-		return core.NewError(core.KindCancelled, opBuild, "上下文已取消")
+		return core.KindCancelled, "上下文已取消", true
 	case context.DeadlineExceeded:
-		return core.NewError(core.KindDeadlineExceeded, opBuild, "上下文已超时")
+		return core.KindDeadlineExceeded, "上下文已超时", true
 	default:
-		return nil
+		return "", "", false
+	}
+}
+
+// summarizeError 把 Summarizer 的失败映射为统一错误：先按 ctx 终态判定取消/超时，
+// 再按外层错误链识别 context.Canceled / DeadlineExceeded（T07 接入真实 LLM 后，
+// 中断最常见的形态就是 Summarize 自己返回 ctx 错误），只有真正的内部失败才归为
+// internal；原始错误始终保留在 Cause 中，供 errors.Is / errors.As 追溯。
+func summarizeError(ctx context.Context, err error) error {
+	if kind, msg, ok := contextKind(ctx); ok {
+		return &core.RunError{Kind: kind, Op: opBuild, Message: "摘要过程中" + msg, Cause: err}
+	}
+	switch {
+	case errors.Is(err, context.Canceled):
+		return &core.RunError{Kind: core.KindCancelled, Op: opBuild, Message: "摘要过程被取消", Cause: err}
+	case errors.Is(err, context.DeadlineExceeded):
+		return &core.RunError{Kind: core.KindDeadlineExceeded, Op: opBuild, Message: "摘要过程超时", Cause: err}
+	default:
+		return &core.RunError{Kind: core.KindInternal, Op: opBuild, Message: "Summarizer 压缩历史失败", Cause: err}
 	}
 }
 

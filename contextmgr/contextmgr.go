@@ -18,8 +18,9 @@ import (
 // SystemPrompt 与 PreviousSummary 显式提供，永不压缩：前者渲染为视图首条 system 消息，
 // 后者是上一次压缩产生的摘要，参与合并摘要；Messages 只允许 user / assistant / tool，
 // 出现 system 角色即 invalid_argument（System Prompt 不得重复携带）。
-// TokenBudget > 0 表示上下文 token 估算上限，<= 0 表示不限制；KeepRecent 表示至少保留
-// 最近 N 条消息（预算不足时可被进一步压缩，见 Manager.Build）。
+// TokenBudget > 0 表示上下文 token 估算上限，<= 0 表示不限制；KeepRecent 是保留条数的
+// 硬下限（按消息条数，原子单元可使其略多于 N 条）：预算装不下 System Prompt、摘要与
+// KeepRecent 条近期消息时 Build 返回 invalid_argument，不降低保留条数（见 Manager.Build）。
 type Request struct {
 	core.ExecutionRef
 	SystemPrompt    string

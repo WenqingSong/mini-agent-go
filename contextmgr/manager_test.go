@@ -314,9 +314,10 @@ func TestBuildCompactsOldHistory(t *testing.T) {
 	}
 }
 
-// TestBuildShrinksTailUntilBudgetFits 覆盖 INV-008：一次吞并一个原子单元仍超预算时继续收紧
-// 保留尾部，Summarizer 调用次数受上限约束，不会无限循环。
-func TestBuildShrinksTailUntilBudgetFits(t *testing.T) {
+// TestBuildFailsWhenKeepRecentTargetExceedsBudget 是 CLEAN-001 的回归测试：KeepRecent 是保留
+// 条数的硬下限，预算装不下「摘要 + KeepRecent 条近期消息」时必须显式失败，不得通过继续吞并
+// 尾部把保留条数降到 KeepRecent 以下后报告成功。
+func TestBuildFailsWhenKeepRecentTargetExceedsBudget(t *testing.T) {
 	est := staticEstimator{perMessage: 1}
 	sum := &fakeSummarizer{summary: "摘要"}
 	mgr := newTestManager(t, est, sum)
@@ -326,31 +327,134 @@ func TestBuildShrinksTailUntilBudgetFits(t *testing.T) {
 		messages = append(messages, userText("m"+string(rune('a'+i)), "内容"))
 	}
 
-	// 保留 3 条时视图 = 1(system) + 1(摘要) + 3 = 5 > 3，必须再吞并单元。
+	// 保留 3 条时视图 = 1(摘要) + 3 = 4 > 3：不允许退化成保留 2 条或 0 条。
 	result, err := mgr.Build(context.Background(), Request{
 		Messages:    messages,
 		TokenBudget: 3,
 		KeepRecent:  3,
 	})
+	if err == nil {
+		t.Fatalf("预算装不下 KeepRecent=3 条近期消息时应失败，实际返回 %+v", result)
+	}
+	if kind := core.KindOf(err); kind != core.KindInvalidArgument {
+		t.Fatalf("错误种类 = %q，期望 %q（错误：%v）", kind, core.KindInvalidArgument, err)
+	}
+	if !strings.Contains(err.Error(), "KeepRecent") {
+		t.Fatalf("错误文本 %q 未指出 KeepRecent 保留下限", err.Error())
+	}
+	assertZeroResult(t, result)
+	if sum.calls != 1 {
+		t.Fatalf("Summarizer 调用次数 = %d，期望 1（保留条数不得靠重复摘要继续收缩）", sum.calls)
+	}
+
+	// 预算刚好容得下保留下限时成功，且保留条数恰为 3（不多压一条）。
+	sum = &fakeSummarizer{summary: "摘要"}
+	mgr = newTestManager(t, est, sum)
+	result, err = mgr.Build(context.Background(), Request{
+		Messages:    messages,
+		TokenBudget: 4,
+		KeepRecent:  3,
+	})
+	if err != nil {
+		t.Fatalf("预算恰好容得下保留下限时 Build() 返回错误：%v", err)
+	}
+	if len(result.Messages) != 1+3 {
+		t.Fatalf("视图长度 = %d，期望 4（摘要 + KeepRecent 条）", len(result.Messages))
+	}
+	if result.DroppedMessages != 7 {
+		t.Fatalf("DroppedMessages = %d，期望 7", result.DroppedMessages)
+	}
+	assertSameMessages(t, "视图尾部", result.Messages[1:], messages[7:])
+	if got := viewTokens(est, result.Messages); got > 4 {
+		t.Fatalf("视图估算值 %d 超出预算 4", got)
+	}
+
+	// 场景二：最新一条 user 消息本身就撑破预算（Cleaner 复现用例）。此时即使只保留 1 条
+	// 近期消息也无法满足预算，必须失败，不得把保留区间吞并到空后返回 [system summary]。
+	probeSum := &fakeSummarizer{summary: "摘要"}
+	probeMgr := newTestManager(t, textEstimator{}, probeSum)
+	probeResult, err := probeMgr.Build(context.Background(), Request{
+		SystemPrompt: "sys",
+		Messages: []core.Message{
+			userText("m1", "旧问"),
+			assistantText("m2", "旧答"),
+			userText("m3", strings.Repeat("长", 200)),
+		},
+		TokenBudget: 5,
+		KeepRecent:  1,
+	})
+	if err == nil {
+		t.Fatalf("最新消息单独撑破预算时应失败，实际返回 %+v", probeResult)
+	}
+	if kind := core.KindOf(err); kind != core.KindInvalidArgument {
+		t.Fatalf("错误种类 = %q，期望 %q（错误：%v）", kind, core.KindInvalidArgument, err)
+	}
+	assertZeroResult(t, probeResult)
+}
+
+// TestBuildKeepsMinimumRecentMessages 是 CLEAN-004 的回归测试：KeepRecent 按「消息条数」而非
+// 「原子单元个数」计，多消息单元（工具组合）下保留区间条数必须 >= KeepRecent。
+// 若实现把 KeepRecent 误解为单元数，或把保留尾部吞并到低于下限，本测试失败。
+func TestBuildKeepsMinimumRecentMessages(t *testing.T) {
+	est := staticEstimator{perMessage: 1}
+	sum := &fakeSummarizer{summary: "摘要"}
+	mgr := newTestManager(t, est, sum)
+
+	// 原子单元：m1 | m2+m3+m4 | m5 | m6+m7 | m8，共 5 个单元、8 条消息。
+	messages := []core.Message{
+		userText("m1", "开始"),
+		assistantCalls("m2", "", call("c1", "read_file", `{"path":"a"}`), call("c2", "read_file", `{"path":"b"}`)),
+		toolMsg("m3", "c1", "A"),
+		toolMsg("m4", "c2", "B"),
+		userText("m5", "继续"),
+		assistantCalls("m6", "", call("c3", "echo", `{"text":"hi"}`)),
+		toolMsg("m7", "c3", "ok"),
+		userText("m8", "结束"),
+	}
+
+	// KeepRecent=4：最小尾部 = m5,m6,m7,m8（4 条、3 个单元）；若按单元数取 4 个单元
+	// 就会保留 7 条（m2..m8），因此本用例能区分两种实现。视图 = 1(摘要) + 4 = 5。
+	result, err := mgr.Build(context.Background(), Request{
+		Messages:    messages,
+		TokenBudget: 5,
+		KeepRecent:  4,
+	})
 	if err != nil {
 		t.Fatalf("Build() 返回错误：%v", err)
 	}
-	if sum.calls != 2 {
-		t.Fatalf("Summarizer 调用次数 = %d，期望 2（逐单元吞并一次后满足预算）", sum.calls)
+	retained := result.Messages[1:]
+	if len(retained) < 4 {
+		t.Fatalf("保留条数 = %d，少于 KeepRecent=4", len(retained))
 	}
-	if sum.calls > len(messages)+1 {
-		t.Fatalf("Summarizer 调用次数 %d 超过 unitCount+1 上限", sum.calls)
+	if len(retained) != 4 {
+		t.Fatalf("保留条数 = %d，期望 4（最小满足保留下限的尾部）", len(retained))
 	}
-	if len(result.Messages) != 3 {
-		t.Fatalf("视图长度 = %d，期望 3", len(result.Messages))
+	if result.DroppedMessages != 4 {
+		t.Fatalf("DroppedMessages = %d，期望 4", result.DroppedMessages)
 	}
-	if result.DroppedMessages != 8 {
-		t.Fatalf("DroppedMessages = %d，期望 8", result.DroppedMessages)
+	assertSameMessages(t, "视图尾部", retained, messages[4:])
+	if err := core.ValidateMessages(result.Messages); err != nil {
+		t.Fatalf("视图未通过 core.ValidateMessages：%v", err)
 	}
-	assertSameMessages(t, "视图尾部", result.Messages[1:], messages[8:])
-	if got := viewTokens(est, result.Messages); got > 3 {
-		t.Fatalf("视图估算值 %d 超出预算 3", got)
+	if got := viewTokens(est, result.Messages); got > 5 {
+		t.Fatalf("视图估算值 %d 超出预算 5", got)
 	}
+
+	// 预算装不下 4 条近期消息（1 + 4 = 5 > 4）时必须失败，不得退回保留 3 条或更少。
+	sum = &fakeSummarizer{summary: "摘要"}
+	mgr = newTestManager(t, est, sum)
+	result, err = mgr.Build(context.Background(), Request{
+		Messages:    messages,
+		TokenBudget: 4,
+		KeepRecent:  4,
+	})
+	if err == nil {
+		t.Fatalf("预算装不下 KeepRecent=4 条近期消息时应失败，实际返回 %+v", result)
+	}
+	if kind := core.KindOf(err); kind != core.KindInvalidArgument {
+		t.Fatalf("错误种类 = %q，期望 %q（错误：%v）", kind, core.KindInvalidArgument, err)
+	}
+	assertZeroResult(t, result)
 }
 
 // TestBuildToolUnitsAreAtomic 覆盖 AC-003 / INV-003：预算与保留边界落在「assistant 携带的
@@ -373,11 +477,15 @@ func TestBuildToolUnitsAreAtomic(t *testing.T) {
 	const prefixTokens = 2
 	fullTokens := prefixTokens + len(messages)
 
+	// 每个 KeepRecent 下，满足保留下限的「最小尾部消息条数」（单元划分：m1 | m2..m4 | m5 | m6,m7 | m8 | m9）。
+	// 按消息条数取尾部：0、1、2、4、4、9；必须恰为这些值，才能同时证明「按条数计数」与「不吞并到下限以下」。
+	minRetained := map[int]int{0: 0, 1: 1, 2: 2, 3: 4, 4: 4, 9: 9}
+
 	for _, keepRecent := range []int{0, 1, 2, 3, 4, 9} {
+		need := prefixTokens + minRetained[keepRecent]
 		for budget := 1; budget <= 12; budget++ {
-			// 只要预算容得下前缀，且确实存在可压缩的更早单元（或本就无需压缩），
-			// 构建就必须成功：不允许以「边界落在单元内部」为由拒绝合法请求。
-			wantSuccess := budget >= fullTokens || (keepRecent < len(messages) && budget >= prefixTokens)
+			// 预算容得下「前缀 + 保留下限」时构建必须成功；否则必须显式失败。
+			wantSuccess := budget >= need
 			label := fmt.Sprintf("keepRecent=%d budget=%d", keepRecent, budget)
 
 			sum := &fakeSummarizer{summary: "摘要"}
@@ -393,8 +501,8 @@ func TestBuildToolUnitsAreAtomic(t *testing.T) {
 				if wantSuccess {
 					t.Fatalf("%s 该预算下必须成功，实际返回错误：%v", label, err)
 				}
-				if kind := core.KindOf(err); kind != core.KindInvalidArgument && kind != core.KindInternal {
-					t.Fatalf("%s 错误种类 = %q，期望 invalid_argument 或 internal", label, kind)
+				if kind := core.KindOf(err); kind != core.KindInvalidArgument {
+					t.Fatalf("%s 错误种类 = %q，期望 invalid_argument（预算不可满足不降级）", label, kind)
 				}
 				assertZeroResult(t, result)
 				continue
@@ -419,15 +527,25 @@ func TestBuildToolUnitsAreAtomic(t *testing.T) {
 			if len(retained) > 0 && retained[0].Role == core.Role("tool") {
 				t.Fatalf("%s 保留区间不得以 tool 结果开头（单元被截断）", label)
 			}
-			if result.Compacted {
+			if len(retained) < keepRecent {
+				t.Fatalf("%s 保留条数 = %d，低于 KeepRecent 下限", label, len(retained))
+			}
+			if budget < fullTokens {
+				// 必须压缩，且保留条数恰为满足保留下限的最小尾部。
+				if !result.Compacted {
+					t.Fatalf("%s 超预算必须压缩，实际 %+v", label, result)
+				}
+				if len(retained) != minRetained[keepRecent] {
+					t.Fatalf("%s 保留条数 = %d，期望 %d", label, len(retained), minRetained[keepRecent])
+				}
 				if result.DroppedMessages != len(messages)-len(retained) {
 					t.Fatalf("%s DroppedMessages = %d，期望 %d", label, result.DroppedMessages, len(messages)-len(retained))
 				}
 				if result.Summary == "" || messageText(t, result.Messages[1]) != result.Summary {
 					t.Fatalf("%s 摘要文本与 Summary 不一致", label)
 				}
-			} else if result.DroppedMessages != 0 || result.Summary != "" {
-				t.Fatalf("%s 未压缩时不应报告丢弃或摘要", label)
+			} else if result.Compacted || result.DroppedMessages != 0 || result.Summary != "" {
+				t.Fatalf("%s 未超预算不应压缩，实际 %+v", label, result)
 			}
 		}
 	}
@@ -609,9 +727,10 @@ func TestBuildRejectsInvalidConfiguration(t *testing.T) {
 	}
 }
 
-// TestBuildCompactionStillOverBudgetReturnsInternal 覆盖 INV-008 的另一半：历史已全部压缩
-// 仍超预算时返回 internal（压缩无法取得有效进展），不返回部分视图，也不死循环。
-func TestBuildCompactionStillOverBudgetReturnsInternal(t *testing.T) {
+// TestBuildFailsWhenPrefixAndRetainedTailExceedBudget 覆盖 CLEAN-001：即使把可按单元压缩的历史
+// 全部压缩，只要 System Prompt + 摘要 + KeepRecent 条近期消息仍超预算，就必须返回
+// invalid_argument，而不是继续吞并尾部或返回部分记忆。
+func TestBuildFailsWhenPrefixAndRetainedTailExceedBudget(t *testing.T) {
 	est := staticEstimator{perMessage: 1}
 	sum := &fakeSummarizer{summary: "摘要"}
 	mgr := newTestManager(t, est, sum)
@@ -619,21 +738,21 @@ func TestBuildCompactionStillOverBudgetReturnsInternal(t *testing.T) {
 	result, err := mgr.Build(context.Background(), Request{
 		SystemPrompt: "系统提示",
 		Messages:     []core.Message{userText("m1", "旧问"), userText("m2", "旧答")},
-		TokenBudget:  1,
+		TokenBudget:  2,
 		KeepRecent:   1,
 	})
 	if err == nil {
 		t.Fatalf("Build() 应返回错误，实际返回 %+v", result)
 	}
-	if kind := core.KindOf(err); kind != core.KindInternal {
-		t.Fatalf("错误种类 = %q，期望 %q（错误：%v）", kind, core.KindInternal, err)
+	if kind := core.KindOf(err); kind != core.KindInvalidArgument {
+		t.Fatalf("错误种类 = %q，期望 %q（错误：%v）", kind, core.KindInvalidArgument, err)
 	}
-	if !strings.Contains(err.Error(), "无法取得有效进展") {
-		t.Fatalf("错误文本 %q 未说明压缩无进展", err.Error())
+	if !strings.Contains(err.Error(), "KeepRecent") {
+		t.Fatalf("错误文本 %q 未指出保留下限约束", err.Error())
 	}
-	// 2 个原子单元 → 调用上限 3，实际每轮吞并一个单元即终止。
-	if sum.calls > 3 {
-		t.Fatalf("Summarizer 调用次数 %d 超出 unitCount+1 上限", sum.calls)
+	// 只允许压缩一次：不得靠重复摘要把保留条数继续压到下限以下。
+	if sum.calls != 1 {
+		t.Fatalf("Summarizer 调用次数 = %d，期望 1", sum.calls)
 	}
 	assertZeroResult(t, result)
 }
@@ -694,6 +813,99 @@ func TestBuildContextCancellation(t *testing.T) {
 	assertZeroResult(t, result)
 }
 
+// TestBuildMapsSummarizerContextErrors 是 CLEAN-002 的回归测试：Summarizer 因 ctx 取消/超时
+// 失败时必须映射为 cancelled / deadline_exceeded（保留 Cause），不得降级为 internal。
+func TestBuildMapsSummarizerContextErrors(t *testing.T) {
+	messages := []core.Message{userText("m1", "旧问"), assistantText("m2", "旧答"), userText("m3", "新问")}
+	// 前缀（摘要）+ 1 条近期消息 = 2，预算 2：必然触发一次 Summarizer 调用。
+	req := Request{Messages: messages, TokenBudget: 2, KeepRecent: 1}
+
+	cases := []struct {
+		name      string
+		newSum    func(cancel context.CancelFunc) Summarizer
+		wantKind  core.ErrorKind
+		wantIs    error
+		wantCause bool
+	}{
+		{
+			name: "Summarizer 直接返回 context.Canceled",
+			newSum: func(context.CancelFunc) Summarizer {
+				return &fakeSummarizer{err: context.Canceled}
+			},
+			wantKind:  core.KindCancelled,
+			wantIs:    context.Canceled,
+			wantCause: true,
+		},
+		{
+			name: "Summarizer 返回包装后的 context.DeadlineExceeded",
+			newSum: func(context.CancelFunc) Summarizer {
+				return &fakeSummarizer{err: fmt.Errorf("摘要调用超时: %w", context.DeadlineExceeded)}
+			},
+			wantKind:  core.KindDeadlineExceeded,
+			wantIs:    context.DeadlineExceeded,
+			wantCause: true,
+		},
+		{
+			name: "Summarizer 内部取消 ctx 后返回普通错误",
+			newSum: func(cancel context.CancelFunc) Summarizer {
+				return &fakeSummarizer{onCall: func(int, SummarizeRequest) (string, error) {
+					cancel()
+					return "", errors.New("摘要调用被中断")
+				}}
+			},
+			// 此例原始错误是普通 error（不是 ctx 错误），Kind 由 ctx 终态决定，Cause 保留原始错误。
+			wantKind:  core.KindCancelled,
+			wantCause: true,
+		},
+		{
+			name: "Summarizer 成功但期间 ctx 已被取消",
+			newSum: func(cancel context.CancelFunc) Summarizer {
+				return &fakeSummarizer{onCall: func(int, SummarizeRequest) (string, error) {
+					cancel()
+					return "摘要", nil
+				}}
+			},
+			// 取消后不返回成功视图：按 ctx 终态失败，无 Cause。
+			wantKind: core.KindCancelled,
+		},
+		{
+			name: "Summarizer 返回普通错误仍为 internal",
+			newSum: func(context.CancelFunc) Summarizer {
+				return &fakeSummarizer{err: errors.New("摘要服务返回 500")}
+			},
+			wantKind:  core.KindInternal,
+			wantCause: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			mgr := newTestManager(t, staticEstimator{perMessage: 1}, tc.newSum(cancel))
+			result, err := mgr.Build(ctx, req)
+			if err == nil {
+				t.Fatalf("Build() 应返回错误，实际返回 %+v", result)
+			}
+			if kind := core.KindOf(err); kind != tc.wantKind {
+				t.Fatalf("错误种类 = %q，期望 %q（错误：%v）", kind, tc.wantKind, err)
+			}
+			var runErr *core.RunError
+			if !errors.As(err, &runErr) {
+				t.Fatalf("错误必须是 *core.RunError，实际为 %T", err)
+			}
+			if tc.wantCause && runErr.Cause == nil {
+				t.Fatalf("原始错误必须保留在 Cause 中")
+			}
+			if tc.wantIs != nil && !errors.Is(err, tc.wantIs) {
+				t.Fatalf("错误链必须可用 errors.Is 追溯 %v：%v", tc.wantIs, err)
+			}
+			assertZeroResult(t, result)
+		})
+	}
+}
+
 // TestBuildEmptyHistoryAndExactBudget 覆盖 AC-005 的空历史边界：没有历史消息时按预算渲染
 // System Prompt 与历史摘要，不触发压缩；预算恰好等于所需时同样不压缩。
 func TestBuildEmptyHistoryAndExactBudget(t *testing.T) {
@@ -735,8 +947,12 @@ func TestBuildBudgetFollowsInjectedEstimator(t *testing.T) {
 		userText("m3", strings.Repeat("内容", 10)),
 	}
 
+	// 同一预算 22：固定 1 token/条 → 3 <= 22 不压缩；按字符计 → 60 > 22，压缩到保留 1 条
+	// （摘要 2 + 最后一条 20 = 22）刚好满足预算与保留下限。
+	const budget = 22
+
 	fixed := newTestManager(t, staticEstimator{perMessage: 1}, &fakeSummarizer{summary: "摘要"})
-	result, err := fixed.Build(context.Background(), Request{Messages: messages, TokenBudget: 3, KeepRecent: 1})
+	result, err := fixed.Build(context.Background(), Request{Messages: messages, TokenBudget: budget, KeepRecent: 1})
 	if err != nil {
 		t.Fatalf("固定估算器下 Build() 返回错误：%v", err)
 	}
@@ -745,12 +961,15 @@ func TestBuildBudgetFollowsInjectedEstimator(t *testing.T) {
 	}
 
 	byText := newTestManager(t, textEstimator{}, &fakeSummarizer{summary: "摘要"})
-	result, err = byText.Build(context.Background(), Request{Messages: messages, TokenBudget: 3, KeepRecent: 1})
+	result, err = byText.Build(context.Background(), Request{Messages: messages, TokenBudget: budget, KeepRecent: 1})
 	if err != nil {
 		t.Fatalf("文本估算器下 Build() 返回错误：%v", err)
 	}
 	if !result.Compacted {
 		t.Fatalf("按字符估算时 3 条长消息必须触发压缩：%+v", result)
+	}
+	if len(result.Messages) != 2 || result.DroppedMessages != 2 {
+		t.Fatalf("保留区间应为 1 条：%+v", result)
 	}
 }
 
