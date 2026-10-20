@@ -2,8 +2,8 @@ schema_version: 3
 task_id: runtime-core-contracts-v1
 
 contract:
-  status: PENDING
-  target: ""
+  status: APPROVED
+  target: "6d7aebe893c6e49cdcf8c08557fae74c85c75b4b"
 
 resources:
   reservations: {}
