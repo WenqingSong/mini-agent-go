@@ -3,6 +3,7 @@
 > 本文件是项目级长期设计事实（WHY / architecture）：模块边界、依赖方向、数据模型、状态机、不变量、失败语义与文件所有权。
 > 任务内的决策过程与逐条接口契约见 `.agent/tasks/runtime-core-contracts-v1/contract.md`（契约层）与 `.agent/tasks/builtin-agent-tools-v1/contract.md`（内置工具，Owner `APPROVED`，Evidence Commit A1）。
 > 两者冲突时：Contract 记录本任务已确认的取舍，本文件记录跨任务长期事实；出现不一致必须回写，不允许长期漂移。
+> 本文件中 `contextmgr` 的实现级契约由 `.agent/tasks/agent-context-manager-v1/contract.md` 落实（Owner `APPROVED`，Evidence Commit A1 = `624a094`）。
 
 ## 1. 范围
 
@@ -50,7 +51,7 @@ go list -f '{{.ImportPath}} {{join .Imports " "}}' ./...
 | `tool` | `Tool` 执行契约、工具元数据、`Registry` 查找 | 具体工具实现、沙箱、权限、并发调度 |
 | `session` | Session / Todo / 摘要数据类型、`Store` 抽象，以及单进程内存 Session Manager（会话生命周期、Turn 执行权与原子提交、过期清理、Todo 生命周期） | 持久化实现、跨进程锁与多副本一致性、摘要生成算法、Agent Loop 调度 |
 | `builtin` | 五个内置工具（`calculator`、`mock_search`、`todo_create`、`todo_list`、`todo_complete`）、固定有序 Mock 数据集、`TodoOperations` 写入端口与领域错误码 | `tool.Registry` 实现、工具调度与失败回填、Todo 存储 / ID 生成 / 生命周期、网络与第三方 SDK |
-| `contextmgr` | 上下文预算、窗口选择与压缩的契约 | 具体压缩算法、tokenizer、消息存储 |
+| `contextmgr` | 上下文预算、窗口选择与压缩：在估算预算内构建可送 Provider 的合法消息视图 | 生产 Summarizer（LLM 摘要适配器）、真实 tokenizer、摘要跨 Run 持久化 |
 | `runlog` | 运行事件模型与 `Sink` 接口 | 落盘格式、采样、上报后端 |
 
 ## 4. 数据模型
@@ -140,9 +141,16 @@ RUNNING ──► COMPLETED        （模型不再要求工具调用）
 
 ## 9. 上下文管理（contextmgr）
 
-- 职责边界：决定“送进 LLM 的消息视图”——token 预算、窗口选择、压缩。
-- 契约只暴露 `Request{Messages, TokenBudget, KeepRecent}` 与 `Result{Messages, Compacted, DroppedMessages}`；token 估算与压缩算法属后续任务。
-- 输出视图仍必须是合法的配对序列（不得因截断产生孤儿 Result），否则装配层必须报 `invalid_pairing` 而不是把非法消息发给 Provider。
+- 职责边界：决定“送进 LLM 的消息视图”——token 估算、窗口选择、压缩。以下为实现级契约（T05，Owner `APPROVED`，R1 修订 A1' = `8e84932`）。
+- 公开契约：
+  - `Request{ExecutionRef, SystemPrompt, PreviousSummary, Messages, TokenBudget, KeepRecent}`；`Result{Messages, Compacted, DroppedMessages, Summary}`；`Manager.Build(ctx, Request) (Result, error)`；`NewManager(estimator, summarizer) (Manager, error)`。
+  - `Messages` 只允许 `user` / `assistant` / `tool`；System Prompt 与历史摘要通过 `SystemPrompt` / `PreviousSummary` 显式提供，`Messages` 携带 `RoleSystem` 即 `invalid_argument`。
+  - `Estimator` 接口 + 默认 `HeuristicEstimator`（4 字符/token 启发式，可注入替换）；`TokenBudget` 是**估算预算**（`<= 0` 不限制），不宣称等于真实模型 token 数；工具 Schema、模型输出等预算由调用方在视图之外预留。
+  - `Summarizer` 接口（`Summarize(ctx, SummarizeRequest) (string, error)`）产出纯文本摘要；仓库内只提供测试用 Fake，生产 LLM 适配器归 T07 且其调用计入 `RunPolicy`。
+- 压缩语义：`TokenBudget` 为唯一触发阈值——完整视图估算未超预算时保持原样（`Compacted=false`、`DroppedMessages=0`、`Summary=""`）；超预算时按原子单元（assistant 消息携带的 ToolCalls 与其全部 ToolResults 同属一个单元）整体压缩保留尾部之前的最老历史，保留不少于 `KeepRecent` 条的近期消息。`KeepRecent` 是硬下限，不通过继续删减保留消息凑预算；单次 `Build` 只调用一次 `Summarizer`，压缩后仍超预算即 `invalid_argument`。System Prompt 与摘要永不压缩。
+- 跨轮次持久化（供 Session Manager 使用）：`Result.Summary` 是新摘要的权威文本；被覆盖消息恰为 `req.Messages` 的前 `DroppedMessages` 条；`Compacted=true` 时调用方以 `Summary` 全量替换旧摘要并删除前 `DroppedMessages` 条消息，`Compacted=false` 时保留旧摘要不变。`contextmgr` 不读写 Session Store。
+- 失败语义：预算不可满足（含 System Prompt、`KeepRecent` 目标、摘要本身）→ `invalid_argument`；`Summarizer` 失败或空/全空白摘要 → `internal`（保留 Cause）；输入消息结构/配对非法 → 原样返回 `core` 错误；`ctx` 取消/超时 → `cancelled` / `deadline_exceeded`。错误路径返回零值 `Result`，不返回部分视图，调用方不得据此修改持久化状态。
+- 输出视图仍必须是合法的配对序列（`core.ValidateMessages`），不得因压缩产生孤儿 Result。
 - 摘要（`session.Session.Summary`）由 Session 持有：Context Manager 只负责生成与更新（经 Turn 能力写入，随 Turn 原子提交），不自行维护一份摘要状态。
 
 ## 10. 运行日志（runlog）
@@ -249,6 +257,11 @@ RUNNING ──► COMPLETED        （模型不再要求工具调用）
 | `builtin/todo_test.go` | builtin | todo 工具会话作用域、领域/基础设施失败分级 |
 | `builtin/todo_concurrency_test.go` | builtin | 工具层并发与测试专用 Fake |
 | `contextmgr/contextmgr.go` | contextmgr | Request / Result / Manager |
+| `contextmgr/estimator.go` | contextmgr | Estimator / HeuristicEstimator |
+| `contextmgr/summarizer.go` | contextmgr | SummarizeRequest / Summarizer |
+| `contextmgr/manager.go` | contextmgr | NewManager 与构建/压缩逻辑 |
+| `contextmgr/estimator_test.go` | contextmgr | `Estimator` / `HeuristicEstimator` 边界 |
+| `contextmgr/manager_test.go` | contextmgr | `Build` 的预算、保留、原子单元与失败语义 |
 | `runlog/runlog.go` | runlog | EventKind / Event / Sink / Discard |
 | `runlog/runlog_test.go` | runlog | `Discard` 无副作用 |
 
@@ -274,7 +287,7 @@ RUNNING ──► COMPLETED        （模型不再要求工具调用）
 - INV-009—INV-013 只有 `tool` 包单元测试证据，尚未在 Agent Loop 中集成验证（集成与终态映射归 Agent Loop 任务）。
 - INV-B05 / INV-B06 的真实会话隔离、跨会话不可写、Todo 生命周期与持久化并发：`builtin` 只有测试专用 Fake 证据，运行期证据归 Agent Loop 集成与装配层。
 - Todo 端到端行为（模型发起 `todo_*` 调用到真实 Todo 落库）：需要 T07 把 `session.TodoOperations` 适配成 `builtin.TodoOperations` 后才可验证。
-- `contextmgr.Request.TokenBudget` 的实际语义需要 tokenizer 支撑，尚未实现。
+- `HeuristicEstimator` 与真实模型 token 数的偏差幅度未验证（按 4 字符/token 估算，对 CJK 偏低）；`TokenBudget` 已固定为估算预算，精确校准依赖真实 tokenizer 评估（T07）。
 - `-race` 与 `go test -race` 未进入 CI（`.cnb.yml` 只有 `make test`），会话并发不变量依赖本地/审查时人工执行。
 - `session` 内存实现无持久化，进程重启数据丢失是既定行为，不做恢复验证。
 
@@ -288,7 +301,8 @@ RUNNING ──► COMPLETED        （模型不再要求工具调用）
 | `session.Store` 的持久化实现（DB / Redis）、重启恢复与数据迁移 | Session 持久化任务 |
 | `builtin.TodoOperations` 的适配实现、Todo ID 生成、状态迁移、`ErrTodoNotFound` 映射 | 装配层任务（T07） |
 | `session.TodoOperations` 与 `builtin.TodoOperations` 两套端口的集成、真实会话隔离与 Todo 端到端验收 | 装配层 + 集成验收 |
-| token 预算、窗口截断、压缩算法 | Context 任务 |
+| token 预算、窗口截断、压缩算法 | 已完成（T05，见 §9） |
+| 生产 LLM `Summarizer` 适配器（调用计入 `RunPolicy`）、真实 tokenizer 与估算校准 | T07 摘要/Provider 集成 |
 | Provider 重试、限流、streaming、鉴权 | Provider 任务 |
 
 归属收窄（2026-10-20，`tool-registry-executor-v1`）：单工具级失败分类（工具级超时、工具 `error`、参数校验失败、未知工具、panic）、参数校验、Registry 生命周期与同一 Run 内重复 Call ID 去重已落入 §7 / §11，不再属于 Agent Loop 任务；Agent Loop 只承担跨 step 的 `RunStatus` 终态映射、是否继续/重试决策与同 step 多调用顺序并发。
