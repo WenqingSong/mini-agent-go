@@ -94,6 +94,10 @@ RUNNING ──► COMPLETED        （模型不再要求工具调用）
 | 正常完成 | `COMPLETED` | — | 成功不表示任何持久化发生 |
 | Provider 调用失败 | `FAILED` | `provider_failure` | 重试属 Provider/Loop 任务 |
 | 可恢复工具失败 | 保持 `RUNNING` | — | 以 `ToolResult{IsError:true}` 回填 |
+| 单工具局部超时（父 Context 未结束） | 保持 `RUNNING`（终态由 Agent Loop 判定） | — | 执行器返回 `ToolResult{IsError:true, CallID}`；不映射为 `CANCELLED` |
+| 参数校验失败 / 未知工具 | 保持 `RUNNING`（终态由 Agent Loop 判定） | — | 同上；工具实现未被调用 |
+| 同一 Run 内重复 Tool Call ID | 由 Agent Loop 判定（上抛则 `FAILED`） | `invalid_pairing` | 执行器拒绝再次执行、不复用首次结果；重复 Result 仍由配对校验拒绝 |
+| 工具 panic | `FAILED`（由 Agent Loop 判定） | `tool_failure` | 执行器恢复为 `*RunError`，保留 `CallID`，不记录堆栈 |
 | 不可恢复工具失败终止 Run | `FAILED` | `tool_failure` | 必须带 `CallID` |
 | LLM 调用达上限 | `LIMIT_EXCEEDED` | `llm_call_limit` | |
 | 工具调用达上限 | `LIMIT_EXCEEDED` | `tool_call_limit` | |
@@ -102,6 +106,8 @@ RUNNING ──► COMPLETED        （模型不再要求工具调用）
 | 消息序列非法 | `FAILED` | `invalid_pairing` / `invalid_argument` | 在进入下一次 LLM 调用前拒绝 |
 
 一致性范围：本契约层无多存储、无消息队列、无异步复制，因此不存在跨系统最终一致性问题。Run 内的部分完成（一次响应中多个 ToolCall 只部分成功）必须通过“每个 Call 各自产生 Result”表达，不允许丢弃成功结果或静默跳过失败调用。重复 Result 由配对校验拒绝，不做静默覆盖。
+
+工具执行层的 Context 边界：工具忽略 `Context` 时，执行器只保证**调用方**在超时/取消后及时返回；不保证终止工具 goroutine、不保证副作用被撤销或回滚、不保证该 goroutine 一定结束。被放弃 goroutine 的后续结果必须丢弃，不得影响同键后续调用。
 
 ## 8. 会话归属与工具身份
 
@@ -132,8 +138,13 @@ RUNNING ──► COMPLETED        （模型不再要求工具调用）
 | INV-004 | 双预算：两个上限都必须为正，计数值不越界，触限只能 `LIMIT_EXCEEDED` | 策略校验 + 映射测试 |
 | INV-005 | 会话归属：Session 独占消息与 Todo，Tool 只拿 ID | 签名核对（无运行期证据） |
 | INV-006 | 取消/超时只能 `CANCELLED`，靠 Kind 区分 | 映射测试（运行期中断行为归 Loop 任务） |
-| INV-007 | 可恢复工具失败回填继续；不可恢复才 `FAILED + tool_failure` | 映射测试（分类策略归 Loop 任务） |
+| INV-007 | 可恢复工具失败回填继续；不可恢复才 `FAILED + tool_failure` | 映射测试（单工具级分类见 INV-010，跨 step 决策归 Loop 任务） |
 | INV-008 | 日志旁路：Sink 失败不改变 Run 结果 | `Discard` 副作用测试（运行期旁路归 Loop 任务） |
+| INV-009 | 单工具执行结果保留 `CallID`：`ToolResult.CallID` 或 `*core.RunError.CallID` 必等于请求 `Call.ID` | `tool/executor_test.go`（成功 / 工具 error / 超时 / panic / 取消 + 空 CallID 归一化） |
+| INV-010 | 单工具失败归类：工具级超时、工具 `error`、参数与名称校验失败 → `ToolResult{IsError:true}`；panic → `tool_failure`；父 Context 取消/整体超时 → `cancelled`/`deadline_exceeded`，且取消优先于工具结果；不新增 `ErrorKind` | `tool/executor_test.go` 表驱动 + `tool/fake_test.go` |
+| INV-011 | 执行前把关：未知工具、参数非法、重复 Call ID、名称或 RunID 非法时 `Tool.Execute` 不被调用 | `tool/executor_test.go` 调用计数表驱动 + `tool/validate_test.go` |
+| INV-012 | 去重范围 = 同一 Run（`RunID + CallID`）内同一 CallID 至多执行一次，重复提交返回 `invalid_pairing` 且不复用首次结果；不同 Run 相互独立；并发同键不产生重复副作用 | `tool/executor_test.go`（同键 / 跨 Run / 并发 `-race`） |
+| INV-013 | Registry 定义不可篡改：并发安全；`Specs()` 按名称稳定排序并返回深拷贝；空 `Parameters` 规范化为 `{"type":"object","properties":{}}`；`Seal` 之后拒绝注册 | `tool/registry_test.go` + `tool/validate_test.go` |
 
 ## 12. 文件所有权
 
@@ -178,6 +189,7 @@ RUNNING ──► COMPLETED        （模型不再要求工具调用）
 
 - `cnb.cool/framework-station/mini-agent-go` 的外部 `go get` 可用性。
 - INV-005 / INV-006 / INV-007 / INV-008 的运行期行为（T00 只有签名、映射函数与契约级测试）。
+- INV-009—INV-013 只有 `tool` 包单元测试证据，尚未在 Agent Loop 中集成验证（集成与终态映射归 Agent Loop 任务）。
 - `contextmgr.Request.TokenBudget` 的实际语义需要 tokenizer 支撑，尚未实现。
 
 归属后续任务：
@@ -185,11 +197,13 @@ RUNNING ──► COMPLETED        （模型不再要求工具调用）
 | 内容 | 归属 |
 | --- | --- |
 | 取消/超时在 Loop 中的实际中断点与消息保留策略 | Agent Loop 任务 |
-| 工具失败可恢复性分类、同 step 多调用顺序与并发 | Agent Loop 任务 |
+| 跨 step 的 `RunStatus` 终态映射、是否继续/重试决策、同 step 多调用顺序与并发 | Agent Loop 任务 |
 | runlog 旁路在真实运行时成立、事件完整性 | Agent Loop 任务 |
 | `session.Store` 的内存与持久化实现、Todo 生命周期 | Session 持久化任务 |
 | token 预算、窗口截断、压缩算法 | Context 任务 |
 | Provider 重试、限流、streaming、鉴权 | Provider 任务 |
+
+归属收窄（2026-10-20，`tool-registry-executor-v1`）：单工具级失败分类（工具级超时、工具 `error`、参数校验失败、未知工具、panic）、参数校验、Registry 生命周期与同一 Run 内重复 Call ID 去重已落入 §7 / §11，不再属于 Agent Loop 任务；Agent Loop 只承担跨 step 的 `RunStatus` 终态映射、是否继续/重试决策与同 step 多调用顺序并发。
 
 ## 15. 演进规则
 
