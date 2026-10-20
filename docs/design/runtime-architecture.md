@@ -113,15 +113,15 @@ RUNNING ──► COMPLETED        （模型不再要求工具调用）
 
 ## 9. 上下文管理（contextmgr）
 
-- 职责边界：决定“送进 LLM 的消息视图”——token 估算、窗口选择、压缩。以下为实现级契约（T05，Owner `APPROVED`，A1 = `624a094`）。
+- 职责边界：决定“送进 LLM 的消息视图”——token 估算、窗口选择、压缩。以下为实现级契约（T05，Owner `APPROVED`，R1 修订 A1' = `8e84932`）。
 - 公开契约：
   - `Request{ExecutionRef, SystemPrompt, PreviousSummary, Messages, TokenBudget, KeepRecent}`；`Result{Messages, Compacted, DroppedMessages, Summary}`；`Manager.Build(ctx, Request) (Result, error)`；`NewManager(estimator, summarizer) (Manager, error)`。
   - `Messages` 只允许 `user` / `assistant` / `tool`；System Prompt 与历史摘要通过 `SystemPrompt` / `PreviousSummary` 显式提供，`Messages` 携带 `RoleSystem` 即 `invalid_argument`。
   - `Estimator` 接口 + 默认 `HeuristicEstimator`（4 字符/token 启发式，可注入替换）；`TokenBudget` 是**估算预算**（`<= 0` 不限制），不宣称等于真实模型 token 数；工具 Schema、模型输出等预算由调用方在视图之外预留。
   - `Summarizer` 接口（`Summarize(ctx, SummarizeRequest) (string, error)`）产出纯文本摘要；仓库内只提供测试用 Fake，生产 LLM 适配器归 T07 且其调用计入 `RunPolicy`。
-- 压缩语义：`TokenBudget` 为唯一触发阈值——完整视图估算未超预算时保持原样（`Compacted=false`、`DroppedMessages=0`、`Summary=""`）；超预算时按原子单元（assistant 消息携带的 ToolCalls 与其全部 ToolResults 同属一个单元）整体压缩最老历史，保留不少于 `KeepRecent` 条的近期消息，逐单元吞并直至满足预算；单次 `Build` 的 `Summarizer` 调用上限为 `unitCount + 1` 且有进展检查。System Prompt 与摘要永不压缩。
+- 压缩语义：`TokenBudget` 为唯一触发阈值——完整视图估算未超预算时保持原样（`Compacted=false`、`DroppedMessages=0`、`Summary=""`）；超预算时按原子单元（assistant 消息携带的 ToolCalls 与其全部 ToolResults 同属一个单元）整体压缩保留尾部之前的最老历史，保留不少于 `KeepRecent` 条的近期消息。`KeepRecent` 是硬下限，不通过继续删减保留消息凑预算；单次 `Build` 只调用一次 `Summarizer`，压缩后仍超预算即 `invalid_argument`。System Prompt 与摘要永不压缩。
 - 跨轮次持久化（供 Session Manager 使用）：`Result.Summary` 是新摘要的权威文本；被覆盖消息恰为 `req.Messages` 的前 `DroppedMessages` 条；`Compacted=true` 时调用方以 `Summary` 全量替换旧摘要并删除前 `DroppedMessages` 条消息，`Compacted=false` 时保留旧摘要不变。`contextmgr` 不读写 Session Store。
-- 失败语义：预算不可满足（含 System Prompt、`KeepRecent` 目标、摘要本身）→ `invalid_argument`；`Summarizer` 失败、空/全空白摘要、压缩无进展 → `internal`（保留 Cause）；输入消息结构/配对非法 → 原样返回 `core` 错误；`ctx` 取消/超时 → `cancelled` / `deadline_exceeded`。错误路径返回零值 `Result`，不返回部分视图，调用方不得据此修改持久化状态。
+- 失败语义：预算不可满足（含 System Prompt、`KeepRecent` 目标、摘要本身）→ `invalid_argument`；`Summarizer` 失败或空/全空白摘要 → `internal`（保留 Cause）；输入消息结构/配对非法 → 原样返回 `core` 错误；`ctx` 取消/超时 → `cancelled` / `deadline_exceeded`。错误路径返回零值 `Result`，不返回部分视图，调用方不得据此修改持久化状态。
 - 输出视图仍必须是合法的配对序列（`core.ValidateMessages`），不得因压缩产生孤儿 Result。
 
 ## 10. 运行日志（runlog）
