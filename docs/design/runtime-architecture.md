@@ -125,7 +125,8 @@ RUNNING ──► COMPLETED        （模型不再要求工具调用）
 
 - 事实源：`session.Manager` 在进程内存中持有会话，是 `session.Session` 的唯一写入口；`Store`（`Load` / `Save`）由 `*Manager` 实现。**无持久化**：进程退出即丢失，重启恢复属后续任务。摘要属于 Session 数据，由 Context Manager 生成/更新，Manager 只负责存储。
 - 执行权：每个会话一把**可被 `context` 取消的**执行权（容量 1 的信号量），同一会话的 Turn 串行，不同会话互不阻塞；禁止跨会话全局锁，`map` 锁不得跨越调用方回调持有。
-- Turn 与提交：`Manager.RunTurn` 在会话执行权内执行调用方回调，回调通过 `*Turn` 写入**隔离暂存区**（消息、摘要、Todo）；只有「`ctx` 未取消 + 回调成功 + Turn 仍打开 + 会话仍是当前 entry + 提交前校验通过」才整体提交。失败、取消、超时、panic 都不产生部分提交，也不刷新 TTL。
+- Turn 与提交：`Manager.RunTurn` 在会话执行权内执行调用方回调，回调通过 `*Turn` 写入**隔离暂存区**（消息追加 `Append`、已提交历史前缀删除 `DropLeading`、摘要 `SetSummary`、Todo）；提交是**全量替换**——`Turn.staged()` 拼装「剩余已提交历史 + 本 Turn 暂存消息」后整体发布，只有「`ctx` 未取消 + 回调成功 + Turn 仍打开 + 会话仍是当前 entry + 提交前校验通过」才整体提交。失败、取消、超时、panic 都不产生部分提交，也不刷新 TTL。
+- 前缀删除语义（`Turn.DropLeading(n)`）：`n` 是本次调用新删除的条数，作用于**当前剩余**的已提交历史（`Turn.base`，进入 Turn 时的私有深拷贝）；同一 Turn 内累计删除量单调不减、每次 `0 <= n <= len(base)`，`n=0` 为空操作，`n=len(base)` 允许清空（含提交空历史）；已删除消息不能通过后续调用恢复。删除边界必须使「剩余已提交历史 + 本 Turn 暂存消息」通过 `core.ValidateMessages`，否则该次调用以 `invalid_pairing`（带 `CallID`）原子拒绝；本 Turn 经 `Append` 新增的消息永不被删除、移动或重排。拒绝不关闭 Turn，也不改变 `base` / 暂存消息 / 摘要 / Todo。
 - 读取隔离：`Get` / `Load` / `Turn.Session` / `Turn.Todos` 返回深拷贝快照，调用方修改不影响会话；Turn 内的读取看到「已提交 + 本 Turn 已暂存」的视图（read-your-writes）。
 - 生命周期：TTL 由配置提供，创建与**成功提交**刷新，普通读取不续期；无后台清理 goroutine，过期判定为惰性访问 + 显式 `PurgeExpired`。过期以「能取得执行权且已过 TTL」为唯一判定，因此正在执行的 Turn 不被清理破坏；过期即物理删除。
 - 重入约束：Turn 内运行的 Tool / Context Manager 只能使用注入的 Turn 能力，**不得持有 `*Manager` 并回调其 `RunTurn` / `Delete` / `Save`**（会重入同一会话执行权而死锁）。
@@ -211,6 +212,9 @@ RUNNING ──► COMPLETED        （模型不再要求工具调用）
 | INV-014 | 执行权不泄漏：正常、错误、取消、超时、过期、删除、panic 路径都释放执行权 | 取消/超时后新请求能取得执行权；panic 用例 |
 | INV-015 | 过期不破坏在途 Turn：以「可取得执行权 + 超过 TTL」判定过期；成功提交刷新 TTL，失败/取消不刷新 | 注入时钟 + 并发 `PurgeExpired` 测试 |
 | INV-016 | Todo 单一事实源与暂存可见性：正式 Todo 只有 `Session.Todos` 一份；Turn 内后续操作能看到未提交修改；Turn 关闭后写入被拒 | `PutTodo` 后立即读、关闭后写入用例 |
+| INV-017 | 前缀删除：`Turn.DropLeading(n)` 只作用于进入 Turn 时的已提交历史前缀，累计删除量单调不减且不超过该历史长度；本 Turn `Append` 的消息不被删除或移动；每次成功返回后「剩余历史 + 暂存消息」满足 `core.ValidateMessages`；拒绝是单次调用原子拒绝且不关闭 Turn；Turn 关闭后写入被拒 | `session/turn_test.go`（删除合法域、配对边界拒绝、`DropLeading`+`SetSummary`+`Append` 组合提交、失败/取消不提交、关闭后拒绝）+ `session/concurrency_test.go`（Turn 内并发 `-race`） |
+
+INV-017 来源：`session-turn-drop-leading-v1` 的 APPROVED `contract.md`（该 Contract 内 INV-001—INV-006 由本条覆盖）。
 
 ## 12. 文件所有权
 
@@ -243,11 +247,11 @@ RUNNING ──► COMPLETED        （模型不再要求工具调用）
 | `tool/fake_test.go` | tool | Fake Tool 与测试辅助（调用计数、watchdog、请求构造） |
 | `session/session.go` | session | TodoStatus（含四个导出常量）/ Todo 与 `Todo.Validate` / Session（含 `Summary`）/ Store |
 | `session/manager.go` | session | ManagerConfig / Manager / Create·Get·Delete·PurgeExpired·RunTurn / 会话执行权 |
-| `session/turn.go` | session | Turn / TodoOperations 实现 / 暂存视图与原子提交 |
+| `session/turn.go` | session | Turn / TodoOperations 实现 / 暂存视图、`DropLeading` 前缀删除与原子提交 |
 | `session/errors.go` | session | ErrSessionNotFound / ErrSessionExpired / ErrSessionExists |
 | `session/manager_test.go` | session | 会话 CRUD 与隔离、Store 适配、不存在/重复创建错误 |
-| `session/turn_test.go` | session | 提交条件、暂存可见性、非法拒绝原子性、Turn 关闭、panic |
-| `session/concurrency_test.go` | session | 同会话串行、跨会话并发、无跨会话全局锁 |
+| `session/turn_test.go` | session | 提交条件、暂存可见性、非法拒绝原子性、前缀删除语义与拒绝边界、Turn 关闭、panic |
+| `session/concurrency_test.go` | session | 同会话串行、跨会话并发、Turn 内并发写入、无跨会话全局锁 |
 | `session/expiry_test.go` | session | TTL 续期、惰性过期、`PurgeExpired` 与在途 Turn |
 | `session/cancel_test.go` | session | 排队取消/超时、执行中取消、执行权释放 |
 | `builtin/builtin.go` | builtin | 包文档 / 工具名与错误码常量 / 成功与失败 Content 编码 / 参数解码与会话字段拒绝 |
