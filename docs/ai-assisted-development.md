@@ -32,7 +32,7 @@ Agent 的行为约束来自仓库内的角色提示词，每次任务按角色�
 字段说明：
 
 - 「决策证据」＝ 该任务的技术契约（`contract.md`）或 Owner 决定（`owner-decision.md`）的落库 commit；任务的 `state.yaml` 中 `contract.target` / `owner.review_target` 指向同一批 SHA。
-- 「实现 commit」＝ 该任务的实现（或审查后修复）提交，即 Coder 交付给 Cleaner 审查的 C1。
+- 「实现 commit」＝ 该任务的实现提交链，按时间顺序写「首轮 C1 → 后续修复」；**格内最后一个 SHA 是该任务最终被 Owner 接受的实现快照**，必须等于该任务 `state.yaml` 的 `review.target`（与 `owner.review_target` / `delivery.review_target` 相同）。首轮 C1 被后续提交取代时，必须在该格内标明它已失效/已被取代，不得把已失效的 C1 呈现为交付实现。
 - 「集成」＝ 合并入 `develop` 的 merge commit；无 merge commit 表示直接提交在 `develop` 上。
 
 | 任务 slug | 编号（任务文件记录） | 需求 | 决策证据 | 实现 commit | 集成 | 结果 |
@@ -42,8 +42,8 @@ Agent 的行为约束来自仓库内的角色提示词，每次任务按角色�
 | `tool-registry-executor-v1` | T02 | [task.md](../.agent/tasks/tool-registry-executor-v1/task.md) | [contract.md](../.agent/tasks/tool-registry-executor-v1/contract.md) `95e10b2`；[owner-decision.md](../.agent/tasks/tool-registry-executor-v1/owner-decision.md)（CL-001 / CL-002） | `707cb71`，修复 `03dced5` | `4106722` | CLEAN / ACCEPTED / delivery PASS |
 | `builtin-agent-tools-v1` | T03（该任务 `task.md` 自述 T03） | [task.md](../.agent/tasks/builtin-agent-tools-v1/task.md) | [contract.md](../.agent/tasks/builtin-agent-tools-v1/contract.md)（D1—D4、D7②）`786d6fd` | `9206897` | `7e0e6ba` | CLEAN / ACCEPTED / delivery PASS |
 | `agent-session-manager-v1` | T04 | [task.md](../.agent/tasks/agent-session-manager-v1/task.md) | [contract.md](../.agent/tasks/agent-session-manager-v1/contract.md)（D1—D6）`5263d2f` | `f23082a` | `73fef46` | CLEAN / ACCEPTED / delivery PASS |
-| `agent-context-manager-v1` | T05 | [task.md](../.agent/tasks/agent-context-manager-v1/task.md) | [contract.md](../.agent/tasks/agent-context-manager-v1/contract.md) `05544f9`；R1 修订 `8e84932`（CLEAN-005） | `d92ada3`，修复 `bb991c1` | `7437e0d` | CLEAN / ACCEPTED / delivery PASS |
-| `runtime-observability-v1` | T06 | [task.md](../.agent/tasks/runtime-observability-v1/task.md) | [contract.md](../.agent/tasks/runtime-observability-v1/contract.md) `6b68fc8` | `08cd0ac` | `dc734d2` | CLEAN / ACCEPTED / delivery PASS |
+| `agent-context-manager-v1` | T05 | [task.md](../.agent/tasks/agent-context-manager-v1/task.md) | [contract.md](../.agent/tasks/agent-context-manager-v1/contract.md) `05544f9`；R1 修订 `8e84932`（CLEAN-005） | `d92ada3`（首轮 C1，已失效），修复 `bb991c1`（C1'）、`61fa094`（C1''，= `review.target`） | `7437e0d` | CLEAN / ACCEPTED / delivery PASS |
+| `runtime-observability-v1` | T06 | [task.md](../.agent/tasks/runtime-observability-v1/task.md) | [contract.md](../.agent/tasks/runtime-observability-v1/contract.md) `6b68fc8` | `08cd0ac`（首轮 C1，已失效：CLEAN-001 导致 `CHANGES_REQUIRED`），修复 `8e4d2fd`（= `review.target`） | `dc734d2` | CLEAN / ACCEPTED / delivery PASS |
 | `session-turn-drop-leading-v1` | 无编号（T07 前置依赖） | [task.md](../.agent/tasks/session-turn-drop-leading-v1/task.md) | [contract.md](../.agent/tasks/session-turn-drop-leading-v1/contract.md) `bcc8e96` | `2ed50f1` | `635e311` | CLEAN / ACCEPTED / delivery PASS |
 | `agent-runtime-loop-v1` | T07 | [task.md](../.agent/tasks/agent-runtime-loop-v1/task.md) | [contract.md](../.agent/tasks/agent-runtime-loop-v1/contract.md)（D1—D5）`4918efa` | `e9dd3da` | `6bebdda` | CLEAN / ACCEPTED / delivery PASS |
 | T08（保留编号：Todo 端口适配 + 生产 `Summarizer`） | T08 | 无记录（任务未创建） | 无记录 | 无记录 | 无记录 | 未交付 |
@@ -52,7 +52,7 @@ Agent 的行为约束来自仓库内的角色提示词，每次任务按角色�
 
 补充说明（与上表一一对应，均为仓库内可核对事实）：
 
-- 多数任务都经历了「Cleaner 提 Finding → Coder 修复 → Cleaner 复审」的循环，上表只列最终被 Owner 接受的实现 commit 与必要的修复 commit；完整链路见各任务 `findings.md`、`state.yaml` 的 `review.target` 历史。
+- 多数任务都经历了「Cleaner 提 Finding → Coder 修复 → Cleaner 复审」的循环。「实现 commit」列按时间顺序列出实现与修复提交，最后一个 SHA 即最终接受快照（= 各任务 `state.yaml` 的 `review.target`）；被取代的首轮 C1 在该格内明确标注为已失效，完整链路见各任务 `findings.md`。
 - 每个任务在实现前都先把决策落库（Contract 或 Owner 决定），实现 commit 不含决策改写。例外是 `runtime-core-contracts-v1`：它本身就是契约层任务，决策文档与代码同属一次交付。
 - 所有任务都以「真实命令 + 真实结果」记录验证，未执行项在 `delivery.md` 中标注为未验证，不以「测试通过」替代真实 Provider 验收。
 
