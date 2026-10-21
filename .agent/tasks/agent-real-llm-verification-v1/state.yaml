@@ -1,0 +1,22 @@
+schema_version: 3
+task_id: agent-real-llm-verification-v1
+
+contract:
+  status: NOT_REQUIRED
+
+resources:
+  reservations: {}
+
+review:
+  status: NOT_REQUESTED
+
+owner:
+  status: PENDING
+
+delivery:
+  status: NOT_RUN
+
+blocked:
+  active: false
+  by: "TaskBuilder"
+  reason: "任务定义已完成，无定义层阻塞。执行前置：Owner 需创建本任务 feature branch（建议 feat/agent-real-llm-verification-v1，基线 f417327）；任何真实模型请求前需 Owner 明确给出 Model、最大上游请求次数、token/费用上限与是否允许一次真实负向测试。"
