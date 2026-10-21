@@ -23,6 +23,6 @@ delivery:
   develop_base: ""
 
 blocked:
-  active: true
+  active: false
   by: "TaskBuilder"
-  reason: "离线验收暴露的生产缺陷（Provider 超时被 HTTP 层误映射为 504）尚未由独立修复任务 provider-timeout-classification-v1 修复并集成；在 develop 复跑全量测试与竞态检测、且 TestProviderUnresponsive 自然转绿前，本任务不得进入 Cleaner、不得标 CLEAN。"
+  reason: "2026-10-21 TaskBuilder 恢复核实后解除：前置修复任务 provider-timeout-classification-v1 已 Owner ACCEPTED（review_target=43ce197）且 delivery PASS，修复提交 43ce197 与合并 4f16069 均已在 origin/develop（HEAD=4f16069）；本任务分支 HEAD=f441413（merge origin/develop）已包含该修复；e2e/ 六文件为已跟踪状态且工作区 clean；contract.md 与 contract.target=0462b5f 完全一致、Design §12 与 git ls-files 一致；在含修复基线上 go test ./e2e -count=1 的 13 个用例全部 PASS（含此前失败的 TestProviderUnresponsive），go build/vet/test ./... 均通过。解除不等于 CLEAN：review.status 仍为 NOT_REQUESTED，待 Coder 提交 C1 后进入 Cleaner。"

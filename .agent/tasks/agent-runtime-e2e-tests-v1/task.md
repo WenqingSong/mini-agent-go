@@ -74,6 +74,18 @@ Design Artifact: `docs/design/runtime-architecture.md`（§12 文件所有权表
   - C：把服务装配并入本任务（Scope 从「测试验收」扩大为「装配 + 验收」），需重判 Complexity / Design Impact，并重写 AC 与 Deliverer 验收对象。
 - OPEN QUESTION（不阻塞执行，需 Owner 校正）：Owner 需求把本任务称为「Task 09」、前置「T08」、并行「T10」，但仓库既有编号为 T00 `runtime-core-contracts-v1`、T01 `agent-runtime-loop-v1`、T02 `llm-openai-client-v1`、T03 `builtin-agent-tools-v1`、T04 `agent-session-manager-v1`、T05 `agent-context-manager-v1`、T06 `runtime-observability-v1`、T09 `agent-http-api-v1`（其 `contract.md` D7 已定稿编号 T09），T08 = 服务装配（尚未建任务、无分支）。Design §14 引用需与此对齐，术语统一由 Analyst 在 Contract 中落定；`task-slug` 不含编号，不影响执行。
 
+### 恢复核实（2026-10-21，TaskBuilder）
+
+- 已核实事实：`develop` HEAD = `4f160699c934d49374d46b680eadc8bd42d67cef`（`merge: 合并 fix/provider-timeout-classification-v1 到 develop`）；修复实现提交 `43ce197ee61ff00ac5b78ec866beae1b42c4bfaf`（`fix(httpapi): 让 Provider 自身超时统一映射为 provider_failure`）已为 `origin/develop` 祖先，设计落库 `aa2f6e2`（`docs/design/http-api.md` §4）同样在 `develop` 上。
+- 已核实事实：前置任务 `provider-timeout-classification-v1` 的 `state.yaml` 为 `contract=APPROVED(34b1505)` / `review=CLEAN(43ce197)` / `owner=ACCEPTED(43ce197)` / `delivery=PASS`，且其交付提交 `c596001`、`580be03`、合并 `4f16069` 均在 `develop` 历史中，非仅存在于 feature 分支。
+- 已核实事实：修复后生产行为与 Contract 失败矩阵一致 —— Provider 自身超时（`openai.Config.Timeout` 到期 + 请求级 ctx 未到期）→ 502 + `provider_failure` + Run `FAILED`；请求级 `httpapi.RequestTimeout` 到期 → 504 + `deadline_exceeded` + Run `CANCELLED`。判定优先级改为「先会话哨兵 → 再最外层 `*core.RunError` 的 Kind → 无 `RunError` 时才兜底裸 Context 哨兵」。
+- 已核实事实：本任务分支 HEAD = `f4414138e31250c8d1b49bae5dd01b91f048c155`（`merge: 合并 origin/develop 到 feat/agent-runtime-e2e-tests-v1`），与 `origin/feat/agent-runtime-e2e-tests-v1` 一致；`43ce197` 已为分支 HEAD 祖先（修复已进入 E2E 分支）。
+- 已核实事实：`e2e/` 六个测试文件已是**已跟踪、已提交**状态（`git ls-files 'e2e/*'` = 6 项），引入提交为 `e0b4021`，此后无改动；工作区 clean，无未跟踪文件，无需保护未提交成果。
+- 已核实事实：在含修复的基线上 `go test ./e2e -count=1` 的 13 个用例全部 PASS（含此前失败的 `TestProviderUnresponsive`，0.05s PASS）；`go build ./...`、`go vet ./...`、`go test ./...` 均通过，Go 版本 `go1.24.1`。
+- 已核实事实：`contract.md` 内容与 `contract.target = 0462b5f` 完全一致（`git diff` 无输出），Design §12 已登记 `e2e/` 六行且与 `git ls-files` 一致。
+- 已知措辞偏差（不阻塞，不得据此削弱验收）：Contract 的 AC-001 Verification 行把 Session 角色序列写成 `user,assistant,tool,tool,assistant`（5 条），而 AC-001 正文要求「连续两轮 `tool_calls`」，实际用例断言为 `user,assistant,tool,assistant,tool,assistant`（6 条，`llm_calls/tool_calls = 3/2`）。以 AC 正文为准；该表行属过时简写，不得用来放宽 AC-001。修正需走 Contract Revision（会使 APPROVED 失效），本任务不自行修改 `contract.md`。
+- 已知提交归属异常（不阻塞，禁止改写历史）：`e2e/` 六个文件是由 `e0b4021`（提交信息为 `provider-timeout-classification-v1` 任务定义与初始状态）一并提交的，提交内容混入了另一任务的产物；该提交只在 E2E feature 分支、不在 `develop`。已发布历史不得 rebase / amend；Cleaner 审查 `review.target` 内的 `e2e/*` 时须覆盖该提交，不得按提交信息推断归属。
+
 ## Verification
 
 - AC-001 → HTTP 层集成用例：构造 `httptest` scripted OpenAI 服务按脚本返回两轮 `tool_calls` 与终稿；断言响应字段、Session 消息序列（`core.ValidateMessages` 通过、`CallID` 对应）、scripted 服务收到的第 N 次请求消息与工具结果内容一致。环境：Linux + Go 1.24.x，无需外部服务。
@@ -106,7 +118,10 @@ COMPLEX
 - Base commit：`d54c912540c090fa7c80961cb6a7cbee8e6ec9a0`（`merge: 合并 feat/agent-http-api-v1 到 develop`）。当前分支 `feat/agent-runtime-e2e-tests-v1` 指向该 commit，与本地 `develop`、`origin/develop`、`origin/feat/agent-runtime-e2e-tests-v1` 一致。
 - 任务开始时已有修改：无。`git status --short` 为空，工作区 clean，无未跟踪文件；`go build` / `go vet` / `go test ./...` 基线全绿。
 - 重叠修改的区分方式：TaskBuilder 只拥有 `.agent/tasks/agent-runtime-e2e-tests-v1/{task.md,state.yaml,findings.md,core-logic.md,owner-decision.md,delivery.md}`；验收测试文件由 Coder 在独立 commit 引入；`contract.md` 与 `docs/design/runtime-architecture.md` 由 Analyst 维护；`delivery.md` 由 Deliverer 维护。发现他人遗留 dirty 文件 → STOP 并报告，不 `git add -A` / `git add .`、不 stash、不覆盖。
+- 恢复基线（2026-10-21）：feature HEAD `f4414138e31250c8d1b49bae5dd01b91f048c155` = `origin/feat/agent-runtime-e2e-tests-v1`；`develop` / `origin/develop` = `4f160699c934d49374d46b680eadc8bd42d67cef`；工作区 clean、无未跟踪文件。Coder 的 `review.target`（C1）必须从该基线之后产生，且 C1 必须包含此前已提交的 `e2e/` 六文件与新增改动。原有 `d54c912` 基线记录保留，用于说明任务起点。
 
 ## Initial Route
 
-BLOCKED（`blocked.active=true`）：前置能力缺口待 Owner 在三项处置中决定后，TaskBuilder 更新 AC 并解除阻塞；解除后交 Analyst（COMPLEX，`contract.status = PENDING`）。
+交 Coder（COMPLEX，`contract.status = APPROVED`，`contract.target = 0462b5f2e783f9d9340a6ea629b76aa2869c40e8`）。
+
+2026-10-21 恢复：前置生产修复已在 `develop` 集成并进入本分支，`blocked.active` 已由 TaskBuilder 置为 `false`；后续按 `Coder → Cleaner → OwnerGate → Deliverer` 继续原有验收，不重写已完成工作、不降低 AC。
