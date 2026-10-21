@@ -132,7 +132,20 @@ type RunOutcome struct {
 | `invalid_pairing` | 500 | `core.KindInvalidPairing` |
 | `internal` | 500 | 其余（`KindInternal`、非 `*core.RunError`、`RunOutcome` 自相矛盾） |
 
-判定优先级固定：**先会话哨兵（`errors.Is`）→ 再 `core.KindOf` → 最后兜底 `internal`**。运行期 `KindInvalidArgument` 一律 `internal`，不得映射为 400：它既可能来自调用参数，也可能来自会话错误，只有哨兵能区分。
+判定优先级固定：
+
+1. 会话哨兵（`errors.Is`，最高优先级）；
+2. 错误链中最外层 `*core.RunError` 的 `Kind`（`core.KindOf`）；
+3. 错误链中不存在 `*core.RunError` 时，裸 Context 哨兵（`errors.Is(err, context.DeadlineExceeded)` / `errors.Is(err, context.Canceled)`）作为兜底；
+4. 其余兜底 `internal`。
+
+由此成立三条长期事实：
+
+- 已有的 `core.RunError.Kind` 是 HTTP 错误分类的权威依据：Run 结论一旦自洽成立，`error.code` 与状态码只由该 `Kind` 决定。
+- 底层 `Cause` 中的 `context.Canceled` / `context.DeadlineExceeded` 不得覆盖已形成的分类（例如 Provider 自身超时归因为 `provider_failure` 时，即使其错误链含 `context.DeadlineExceeded`，也必须是 `502 provider_failure`，不得退化为 `504 deadline_exceeded`）。
+- 错误链中没有 `*core.RunError` 时，Context 哨兵作为兜底判定（例如直接传入的请求 ctx 超时 / 取消 → `504 deadline_exceeded` / `408 cancelled`）。
+
+运行期 `KindInvalidArgument` 一律 `internal`，不得映射为 400：它既可能来自调用参数，也可能来自会话错误，只有哨兵能区分。
 
 `/v1/chat` 的处理顺序固定：路由 → 认证 → `Content-Type` → 有界读取与解析 → `SessionStore.Get` 预检（不调用 `Runner`，`Get` 不续期 TTL）→ 派生请求 context 并调用 `Runner` → 结果映射。`Runner` 返回的会话哨兵必须映射为与预检相同的 code（TOCTOU 防御）。
 

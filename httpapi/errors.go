@@ -153,7 +153,14 @@ func writeError(w http.ResponseWriter, code ErrorCode) {
 
 // errorCodeOf 把来自会话层或运行层的结果映射为协议错误码。
 //
-// 判定优先级固定：先会话哨兵（errors.Is）→ 再 context 终态 → 再 core.KindOf → 最后兜底 internal。
+// 判定优先级固定：先会话哨兵（errors.Is）→ 再链中最外层 *core.RunError 的 Kind
+// → 链中没有 *core.RunError 时才用裸 Context 哨兵兜底 → 最后 internal。
+//
+// 已形成的 Run 结论是唯一权威：RunError.Cause 中出现的 context.Canceled /
+// context.DeadlineExceeded 不得覆盖该结论，例如 Provider 自身超时已归因为
+// provider_failure 时，即使其错误链含 context.DeadlineExceeded 也必须映射为 502。
+// 只有链中没有 *core.RunError（未形成 Run 结论）时，Context 哨兵才作为兜底，
+// 覆盖直接传入的请求 ctx 超时 / 取消。
 // 会话错误只能按哨兵分类，不能按错误文本；core.KindInvalidArgument 一律 internal，
 // 因为它既可能来自调用参数，也可能来自会话错误，只有哨兵能区分。
 func errorCodeOf(err error) ErrorCode {
@@ -170,31 +177,38 @@ func errorCodeOf(err error) ErrorCode {
 		return CodeSessionExists
 	}
 
+	// 结论优先：只按最外层 RunError 的 Kind 映射，Cause 中的 ctx 哨兵不参与判定。
+	// 必须先显式判断链中是否存在 RunError：core.KindOf 对非 RunError 也返回 internal。
+	var runErr *core.RunError
+	if errors.As(err, &runErr) {
+		switch core.KindOf(err) {
+		case core.KindDeadlineExceeded:
+			return CodeDeadlineExceeded
+		case core.KindCancelled:
+			return CodeCancelled
+		case core.KindProviderFailure:
+			return CodeProviderFailure
+		case core.KindToolFailure:
+			return CodeToolFailure
+		case core.KindLLMCallLimit:
+			return CodeLLMCallLimit
+		case core.KindToolCallLimit:
+			return CodeToolCallLimit
+		case core.KindInvalidPairing:
+			return CodeInvalidPairing
+		default:
+			return CodeInternal
+		}
+	}
+
+	// 兜底：没有 Run 结论时按裸 ctx 终态分类（直接传入的请求 ctx 超时 / 取消）。
 	if errors.Is(err, context.DeadlineExceeded) {
 		return CodeDeadlineExceeded
 	}
 	if errors.Is(err, context.Canceled) {
 		return CodeCancelled
 	}
-
-	switch core.KindOf(err) {
-	case core.KindDeadlineExceeded:
-		return CodeDeadlineExceeded
-	case core.KindCancelled:
-		return CodeCancelled
-	case core.KindProviderFailure:
-		return CodeProviderFailure
-	case core.KindToolFailure:
-		return CodeToolFailure
-	case core.KindLLMCallLimit:
-		return CodeLLMCallLimit
-	case core.KindToolCallLimit:
-		return CodeToolCallLimit
-	case core.KindInvalidPairing:
-		return CodeInvalidPairing
-	default:
-		return CodeInternal
-	}
+	return CodeInternal
 }
 
 // writeJSON 写出固定结构的 JSON 响应。

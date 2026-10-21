@@ -1,12 +1,14 @@
 package httpapi_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -14,6 +16,8 @@ import (
 	"cnb.cool/framework-station/mini-agent-go/core"
 	"cnb.cool/framework-station/mini-agent-go/httpapi"
 	"cnb.cool/framework-station/mini-agent-go/llm"
+	"cnb.cool/framework-station/mini-agent-go/runlog"
+	"cnb.cool/framework-station/mini-agent-go/service"
 	"cnb.cool/framework-station/mini-agent-go/session"
 	"cnb.cool/framework-station/mini-agent-go/tool"
 )
@@ -310,4 +314,110 @@ func snapshot(t *testing.T, manager *session.Manager, id string) session.Session
 		t.Fatalf("读取会话 %q 快照失败：%v", id, err)
 	}
 	return snapshot
+}
+
+// seedSessionState 创建会话并写入完整基线（消息、摘要、Todo），用于原子性比对。
+func seedSessionState(t *testing.T, manager *session.Manager, base session.Session) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := manager.Create(ctx, base.ID); err != nil {
+		t.Fatalf("创建会话 %q 失败：%v", base.ID, err)
+	}
+	if err := manager.Save(ctx, base); err != nil {
+		t.Fatalf("写入会话 %q 基线失败：%v", base.ID, err)
+	}
+}
+
+// assertSessionStateEqual 断言失败路径后会话的消息、摘要与 Todo 与请求前逐字段相等。
+func assertSessionStateEqual(t *testing.T, manager *session.Manager, want session.Session) {
+	t.Helper()
+	got := snapshot(t, manager, want.ID)
+	if !reflect.DeepEqual(got.Messages, want.Messages) {
+		t.Fatalf("会话消息被修改：before=%+v after=%+v", want.Messages, got.Messages)
+	}
+	if got.Summary != want.Summary {
+		t.Fatalf("会话摘要被修改：before=%q after=%q", want.Summary, got.Summary)
+	}
+	if !reflect.DeepEqual(got.Todos, want.Todos) {
+		t.Fatalf("会话 Todo 被修改：before=%+v after=%+v", want.Todos, got.Todos)
+	}
+	if err := core.ValidateMessages(got.Messages); err != nil {
+		t.Fatalf("失败路径后历史不再合法：%v", err)
+	}
+}
+
+// failingProvider 是可注入错误的 LLM Provider 替身：用于构造真实 Run 下的 Provider 失败。
+type failingProvider struct {
+	mu         sync.Mutex
+	calls      int
+	onComplete func(ctx context.Context) (llm.Response, error)
+}
+
+// Complete 实现 llm.Provider：记录调用并执行注入行为。
+func (p *failingProvider) Complete(ctx context.Context, _ llm.Request) (llm.Response, error) {
+	p.mu.Lock()
+	p.calls++
+	hook := p.onComplete
+	p.mu.Unlock()
+
+	if hook == nil {
+		return llm.Response{}, errors.New("failing provider: 未注入行为")
+	}
+	return hook(ctx)
+}
+
+// callCount 返回 Provider 被调用次数。
+func (p *failingProvider) callCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
+// newRealRunner 用真实 session.Manager 与真实 agent.Loop（经 service 装配）构造 Runner。
+func newRealRunner(t *testing.T, provider llm.Provider, manager *session.Manager, sink runlog.Sink) *service.Runner {
+	t.Helper()
+	registry := tool.NewMapRegistry()
+	if err := registry.Seal(); err != nil {
+		t.Fatalf("封闭注册表失败：%v", err)
+	}
+	runner, err := service.NewRunner(service.Deps{
+		Provider: provider,
+		Sessions: manager,
+		Registry: registry,
+		Sink:     sink,
+	}, service.Config{Model: "test-model"})
+	if err != nil {
+		t.Fatalf("构造 Runner 失败：%v", err)
+	}
+	return runner
+}
+
+// runFinishedRecord 是 run_finished 在 JSON 日志中的观测字段。
+type runFinishedRecord struct {
+	Event     string `json:"event"`
+	Status    string `json:"status"`
+	ErrorKind string `json:"error_kind"`
+}
+
+// lastRunFinished 从 JSON Sink 输出中取出最后一条 run_finished 事件。
+func lastRunFinished(t *testing.T, buffer *bytes.Buffer) runFinishedRecord {
+	t.Helper()
+	var found *runFinishedRecord
+	for _, line := range strings.Split(strings.TrimSpace(buffer.String()), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var record runFinishedRecord
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("运行日志不是合法 JSON：%v（%q）", err, line)
+		}
+		if record.Event == string(runlog.KindRunFinished) {
+			copied := record
+			found = &copied
+		}
+	}
+	if found == nil {
+		t.Fatalf("运行日志中缺少 run_finished 事件：%s", buffer.String())
+	}
+	return *found
 }
