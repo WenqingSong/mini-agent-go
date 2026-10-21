@@ -15,7 +15,8 @@ $:
             git --version
             docker version
             docker compose version
-main:
+# 集成分支：main 保持原有流水线，develop 作为开发基线同样自动触发
+"(main|develop)":
   pull_request:
     - name: pr-check
       services:

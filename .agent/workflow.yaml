@@ -1,6 +1,9 @@
+# Workflow V3 machine configuration（宿主项目长期机器配置）
+# integration_branch 由 Adoption 确定：本项目共享集成分支为 develop。
+# resources: 当前项目无已确认的 Shared Resource Kind，保留空映射。
 schema_version: 1
 
 git:
-  integration_branch: main
+  integration_branch: develop
 
 resources: {}

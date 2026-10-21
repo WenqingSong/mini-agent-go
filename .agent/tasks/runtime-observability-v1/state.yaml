@@ -1,0 +1,28 @@
+schema_version: 3
+task_id: runtime-observability-v1
+
+contract:
+  status: APPROVED
+  target: "6b68fc8"
+
+resources:
+  reservations: {}
+
+review:
+  status: CLEAN
+  target: "8e4d2fd"
+
+owner:
+  status: ACCEPTED
+  review_target: "8e4d2fd"
+
+delivery:
+  status: PASS
+  review_target: "8e4d2fd"
+  feature_head: "ce0f5076afc0b1741c02375c5d82e3a73bedf8e9"
+  develop_base: "6902d2445665ec356a2db22b33b7749d39d8018e"
+
+blocked:
+  active: false
+  by: ""
+  reason: ""

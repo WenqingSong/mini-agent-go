@@ -1,0 +1,28 @@
+schema_version: 3
+task_id: runtime-core-contracts-v1
+
+contract:
+  status: APPROVED
+  target: "6d7aebe893c6e49cdcf8c08557fae74c85c75b4b"
+
+resources:
+  reservations: {}
+
+review:
+  status: CLEAN
+  target: "b4b95733ff413a1f21148e763eb9062b824f78be"
+
+owner:
+  status: ACCEPTED
+  review_target: "b4b95733ff413a1f21148e763eb9062b824f78be"
+
+delivery:
+  status: PASS
+  review_target: "b4b95733ff413a1f21148e763eb9062b824f78be"
+  feature_head: "f152f338c41cc21bf94f52efaa27918865da5da5"
+  develop_base: "ebf87788d93fce6b260627295a440e9ae252d608"
+
+blocked:
+  active: false
+  by: ""
+  reason: ""

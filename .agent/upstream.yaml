@@ -1,7 +1,0 @@
-# Project-owned provenance. Fill from VERIFIED upstream, never host HEAD.
-schema_version: 1
-repository: https://cnb.cool/framework-station/agent-workflow
-commit: 229edfd18e3b6e770f803db01e5010b215ba623f
-version: 4.3.0
-subdirectory: .agent
-local_changes: null

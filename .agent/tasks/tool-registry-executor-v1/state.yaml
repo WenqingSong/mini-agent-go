@@ -1,0 +1,28 @@
+schema_version: 3
+task_id: tool-registry-executor-v1
+
+contract:
+  status: APPROVED
+  target: "95e10b2f902d28411062bc16812e6887e87853d6"
+
+resources:
+  reservations: {}
+
+review:
+  status: CLEAN
+  target: "03dced5177ba7db864fe6c553a9ca4ce2e7c6136"
+
+owner:
+  status: ACCEPTED
+  review_target: "03dced5177ba7db864fe6c553a9ca4ce2e7c6136"
+
+delivery:
+  status: PASS
+  review_target: "03dced5177ba7db864fe6c553a9ca4ce2e7c6136"
+  feature_head: "40a10c0017c18f166a919703846f9106b67b24e3"
+  develop_base: "6902d2445665ec356a2db22b33b7749d39d8018e"
+
+blocked:
+  active: false
+  by: ""
+  reason: ""

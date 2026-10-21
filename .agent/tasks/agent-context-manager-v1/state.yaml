@@ -1,0 +1,28 @@
+schema_version: 3
+task_id: agent-context-manager-v1
+
+contract:
+  status: APPROVED
+  target: "8e84932a1152889e35a5be6997c9721184f796d9"
+
+resources:
+  reservations: {}
+
+review:
+  status: CLEAN
+  target: "61fa094ad44a14ea608ffcc773c20689e057e00b"
+
+owner:
+  status: ACCEPTED
+  review_target: "61fa094ad44a14ea608ffcc773c20689e057e00b"
+
+delivery:
+  status: PASS
+  review_target: "61fa094ad44a14ea608ffcc773c20689e057e00b"
+  feature_head: "63a4e336eb31c20639a91808d34b51f6efce41f0"
+  develop_base: "6902d2445665ec356a2db22b33b7749d39d8018e"
+
+blocked:
+  active: false
+  by: ""
+  reason: ""
