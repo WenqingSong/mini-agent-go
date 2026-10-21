@@ -13,6 +13,10 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"cnb.cool/framework-station/mini-agent-go/contextmgr"
+	"cnb.cool/framework-station/mini-agent-go/core"
+	"cnb.cool/framework-station/mini-agent-go/service"
 )
 
 // 测试注入的假凭证：不得出现在任何响应、日志或配置输出中。
@@ -420,4 +424,200 @@ func headerText(header http.Header) string {
 		builder.WriteString("\n")
 	}
 	return builder.String()
+}
+
+// TestLoadConfigContextBudget 核对上下文预算与保留下限的配置解析：
+// 未配置时保持禁用且保留下限取默认值；显式负值/非整数属于配置错误。
+func TestLoadConfigContextBudget(t *testing.T) {
+	base := map[string]string{
+		"MINI_AGENT_LLM_BASE_URL": "http://127.0.0.1:1/v1",
+		"MINI_AGENT_MODEL":        "test-model",
+	}
+
+	_, serviceConfig, _, err := loadConfig(envFunc(base))
+	if err != nil {
+		t.Fatalf("未配置上下文预算时应使用默认值：%v", err)
+	}
+	if serviceConfig.TokenBudget != 0 {
+		t.Fatalf("TokenBudget 默认值 = %d，期望 0（禁用压缩）", serviceConfig.TokenBudget)
+	}
+	if serviceConfig.KeepRecent != service.DefaultKeepRecent {
+		t.Fatalf("KeepRecent 默认值 = %d，期望 %d", serviceConfig.KeepRecent, service.DefaultKeepRecent)
+	}
+
+	enabled := map[string]string{
+		"MINI_AGENT_LLM_BASE_URL":         base["MINI_AGENT_LLM_BASE_URL"],
+		"MINI_AGENT_MODEL":                base["MINI_AGENT_MODEL"],
+		"MINI_AGENT_CONTEXT_TOKEN_BUDGET": "4096",
+		"MINI_AGENT_CONTEXT_KEEP_RECENT":  "6",
+	}
+	_, serviceConfig, _, err = loadConfig(envFunc(enabled))
+	if err != nil {
+		t.Fatalf("合法上下文配置解析失败：%v", err)
+	}
+	if serviceConfig.TokenBudget != 4096 || serviceConfig.KeepRecent != 6 {
+		t.Fatalf("上下文配置未生效：TokenBudget=%d KeepRecent=%d", serviceConfig.TokenBudget, serviceConfig.KeepRecent)
+	}
+
+	invalid := []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{name: "预算为负", key: "MINI_AGENT_CONTEXT_TOKEN_BUDGET", value: "-1"},
+		{name: "保留下限为负", key: "MINI_AGENT_CONTEXT_KEEP_RECENT", value: "-1"},
+		{name: "预算不是整数", key: "MINI_AGENT_CONTEXT_TOKEN_BUDGET", value: "4k"},
+	}
+	for _, item := range invalid {
+		t.Run(item.name, func(t *testing.T) {
+			values := map[string]string{
+				"MINI_AGENT_LLM_BASE_URL": base["MINI_AGENT_LLM_BASE_URL"],
+				"MINI_AGENT_MODEL":        base["MINI_AGENT_MODEL"],
+				item.key:                  item.value,
+			}
+			if _, _, _, err := loadConfig(envFunc(values)); err == nil {
+				t.Fatal("非法上下文配置必须被拒绝")
+			} else if !strings.Contains(err.Error(), item.key) {
+				t.Fatalf("错误文本未指出非法变量 %s：%v", item.key, err)
+			}
+		})
+	}
+}
+
+// wireMessage 是 Chat Completions 请求中的一条消息（只解析本用例需要的字段）。
+type wireMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// recordingOpenAI 启动固定的 OpenAI 兼容假服务并记录每次请求的消息序列。
+func recordingOpenAI(t *testing.T, reply string) (*httptest.Server, func() [][]wireMessage) {
+	t.Helper()
+	var (
+		mu      sync.Mutex
+		records [][]wireMessage
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		var request struct {
+			Messages []wireMessage `json:"messages"`
+		}
+		payload, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(payload, &request); err != nil {
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		records = append(records, request.Messages)
+		mu.Unlock()
+
+		response := map[string]any{
+			"id": "chatcmpl-test",
+			"choices": []map[string]any{{
+				"message":       map[string]any{"role": "assistant", "content": reply},
+				"finish_reason": "stop",
+			}},
+			"usage": map[string]any{"prompt_tokens": 3, "completion_tokens": 2},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(response)
+	}))
+	t.Cleanup(server.Close)
+	return server, func() [][]wireMessage {
+		mu.Lock()
+		defer mu.Unlock()
+		out := make([][]wireMessage, len(records))
+		copy(out, records)
+		return out
+	}
+}
+
+// TestRunCompactsWithConfiguredBudgetEnv 是「make up 后可通过 HTTP 触发压缩」的进程级证据：
+// 只通过环境变量启用预算，正式 run() 装配的 HTTP 服务在长对话中实际发生压缩，
+// 每次发给 Provider 的请求都不超过配置预算，且压缩后的历史被截断、摘要被召回。
+func TestRunCompactsWithConfiguredBudgetEnv(t *testing.T) {
+	const budget = 800
+	llmServer, requests := recordingOpenAI(t, "已收到")
+	logs := &syncBuffer{}
+	baseURL, signals, results, _ := startRun(t, map[string]string{
+		"MINI_AGENT_LISTEN_ADDR":          "127.0.0.1:0",
+		"MINI_AGENT_AUTH_TOKEN":           fakeAuthToken,
+		"MINI_AGENT_LLM_BASE_URL":         llmServer.URL,
+		"MINI_AGENT_MODEL":                "test-model",
+		"MINI_AGENT_CONTEXT_TOKEN_BUDGET": "800",
+		"MINI_AGENT_CONTEXT_KEEP_RECENT":  "2",
+		"MINI_AGENT_REQUEST_TIMEOUT":      "30s",
+	}, logs)
+
+	status, body, _ := httpJSON(t, http.MethodPost, baseURL+"/v1/sessions", "", fakeAuthToken)
+	if status != http.StatusCreated {
+		t.Fatalf("创建会话 = (%d,%s)，期望 201", status, body)
+	}
+	var created struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.Unmarshal(body, &created); err != nil {
+		t.Fatalf("创建会话响应不是合法 JSON：%v", err)
+	}
+
+	longQuestion := strings.Repeat("长问题内容", 60) // 300 个 CJK 字符
+	for round := 1; round <= 4; round++ {
+		chatBody := fmt.Sprintf(`{"session_id":%q,"message":%q}`, created.SessionID, longQuestion+fmt.Sprintf("第%d轮", round))
+		status, body, _ = httpJSON(t, http.MethodPost, baseURL+"/v1/chat", chatBody, fakeAuthToken)
+		if status != http.StatusOK {
+			t.Fatalf("第 %d 轮 chat = (%d,%s)，期望 200", round, status, body)
+		}
+	}
+
+	records := requests()
+	if len(records) != 4 {
+		t.Fatalf("Provider 请求次数 = %d，期望 4", len(records))
+	}
+	var estimator contextmgr.HeuristicEstimator
+	compacted := 0
+	for index, messages := range records {
+		total := 0
+		for _, message := range messages {
+			total += estimator.EstimateMessage(core.Message{
+				Role:    core.Role(message.Role),
+				Content: []core.ContentPart{{Type: core.ContentType("text"), Text: message.Content}},
+			})
+			if message.Role == "system" && strings.Contains(message.Content, "早期对话摘要") {
+				compacted++
+			}
+		}
+		if total > budget {
+			t.Fatalf("第 %d 次请求估算值 = %d，超出配置预算 %d", index+1, total, budget)
+		}
+	}
+	if compacted == 0 {
+		t.Fatalf("正式服务未发生上下文压缩：所有请求都没有摘要 system 消息")
+	}
+
+	// 压缩后最早的历史不再发送，但摘要必须召回。
+	last := records[len(records)-1]
+	lastText := ""
+	for _, message := range last {
+		lastText += message.Content
+	}
+	if strings.Contains(lastText, "第1轮") {
+		t.Fatalf("压缩后仍把最早一轮历史发送给 Provider：%s", lastText)
+	}
+	if !strings.Contains(lastText, "早期对话摘要") {
+		t.Fatalf("压缩后未召回摘要：%s", lastText)
+	}
+
+	signals <- os.Interrupt
+	select {
+	case err := <-results:
+		if err != nil {
+			t.Fatalf("优雅关闭返回错误：%v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("收到终止信号后未在限定时间内退出")
+	}
+	scanForSecrets(t, "运行日志", logs.String())
 }

@@ -19,7 +19,7 @@ make ci
 | 内置工具 | [builtin](../builtin/) 下各工具测试 | 四则运算、固定数据集搜索、Todo 端口的会话作用域 |
 | 同会话记忆与跨会话隔离 | [e2e/chat_test.go](../e2e/chat_test.go)：`TestSessionMemoryAndCrossSessionIsolation` | 下一轮模型请求包含历史和工具结果，另一会话快照不变 |
 | 失败整轮不提交 | [service/runner_test.go](../service/runner_test.go)：`TestRunProviderFailureLeavesNoPartialHistory` | 失败后没有半轮用户消息或工具历史 |
-| 上下文压缩 | [agent/context_test.go](../agent/context_test.go)、[contextmgr/manager_test.go](../contextmgr/manager_test.go) | 使用 Fake Summarizer 验证摘要提交、预算、近期消息下限、Call/Result 配对 |
+| 上下文压缩 | [e2e/context_test.go](../e2e/context_test.go)、[contextmgr/digest_test.go](../contextmgr/digest_test.go)、[agent/context_test.go](../agent/context_test.go)、[contextmgr/manager_test.go](../contextmgr/manager_test.go) | 正式 HTTP 服务配置预算后真实触发压缩：历史缩减、摘要召回、工具配对、失败回滚、预算不足、并发隔离；模块层验证摘要确定性/有界性与预算边界 |
 | 超时、取消与额度耗尽 | [e2e/failure_test.go](../e2e/failure_test.go)、[e2e/timeout_test.go](../e2e/timeout_test.go) | HTTP、Run 终态和会话提交结果 |
 | 错误分类一致性 | [httpapi/handler_test.go](../httpapi/handler_test.go)：`TestProviderFailureClassificationEndToEnd`、`TestRequestTimeoutClassificationEndToEnd` | Provider 故障与请求级超时不混淆 |
 | 并发 | [session/concurrency_test.go](../session/concurrency_test.go)、[e2e/concurrency_test.go](../e2e/concurrency_test.go) | 同会话串行、跨会话并发及竞态检查 |
@@ -39,7 +39,7 @@ go test -count=1 ./httpapi -run 'TestProviderFailureClassificationEndToEnd|TestR
 
 `e2e/harness_test.go` 使用真实 HTTP 层、Agent Loop、OpenAI 协议客户端和 Session Manager，模型端是本机 scripted server。测试注册 `calculator` 与 `mock_search`；默认 `cmd/mini-agent` 只注册 `calculator`。
 
-Todo 工具当前以测试专用端口验证。E2E 中的 Todo 与摘要是预置会话数据，用于验证状态隔离，不是通过模型调用 Todo 创建出来的。压缩使用注入的 Fake Summarizer 单独验证，默认 HTTP 服务不启用该路径。
+Todo 工具当前以测试专用端口验证。E2E 中的 Todo 预置数据用于验证状态隔离，不是通过模型调用 Todo 创建出来的。上下文压缩通过 `harnessOptions.tokenBudget` 启用正式装配路径（默认 `DigestSummarizer`，零模型调用）；`cmd/mini-agent` 的进程级用例只通过环境变量启用预算，证明不注入任何实现也能触发压缩。
 
 ### README 运行路径复核
 

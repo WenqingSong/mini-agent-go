@@ -42,6 +42,10 @@ const (
 	envMaxLLMCalls     = "MINI_AGENT_MAX_LLM_CALLS"
 	envMaxToolCalls    = "MINI_AGENT_MAX_TOOL_CALLS"
 	envToolTimeout     = "MINI_AGENT_TOOL_TIMEOUT"
+	// 上下文压缩：预算 0 或未配置表示禁用（负值视为配置错误）；
+	// KeepRecent 0 或未配置时使用 service.DefaultKeepRecent。
+	envContextTokenBudget = "MINI_AGENT_CONTEXT_TOKEN_BUDGET"
+	envContextKeepRecent  = "MINI_AGENT_CONTEXT_KEEP_RECENT"
 )
 
 // toolTimeoutDisabled 表示不设工具级超时：agent.Config.ToolTimeout <= 0 即不设超时。
@@ -233,15 +237,22 @@ func loadConfig(getenv func(string) string) (httpapi.Config, service.Config, ope
 		MaxToolCalls: service.DefaultMaxToolCalls,
 		SystemPrompt: getenv(envSystemPrompt),
 		Model:        strings.TrimSpace(getenv(envModel)),
-		// v1 明确禁用上下文压缩：TokenBudget 固定 0。
+		// 上下文压缩默认关闭：未配置预算时行为与旧版本一致（不压缩、无限积累历史）。
 		TokenBudget: 0,
-		KeepRecent:  0,
+		KeepRecent:  service.DefaultKeepRecent,
 		ToolTimeout: service.DefaultToolTimeout,
 	}
 	if serviceConfig.MaxLLMCalls, err = positiveIntEnv(getenv, envMaxLLMCalls, serviceConfig.MaxLLMCalls); err != nil {
 		return httpapi.Config{}, service.Config{}, openai.Config{}, err
 	}
 	if serviceConfig.MaxToolCalls, err = positiveIntEnv(getenv, envMaxToolCalls, serviceConfig.MaxToolCalls); err != nil {
+		return httpapi.Config{}, service.Config{}, openai.Config{}, err
+	}
+	// 0 表示禁用压缩；负数属于配置错误（显式拒绝，不做静默降级）。
+	if serviceConfig.TokenBudget, err = nonNegativeIntEnv(getenv, envContextTokenBudget, serviceConfig.TokenBudget); err != nil {
+		return httpapi.Config{}, service.Config{}, openai.Config{}, err
+	}
+	if serviceConfig.KeepRecent, err = nonNegativeIntEnv(getenv, envContextKeepRecent, serviceConfig.KeepRecent); err != nil {
 		return httpapi.Config{}, service.Config{}, openai.Config{}, err
 	}
 	toolTimeout, err := durationEnv(getenv, envToolTimeout, serviceConfig.ToolTimeout)
@@ -333,6 +344,19 @@ func positiveIntEnv(getenv func(string) string, name string, fallback int) (int,
 	}
 	if strings.TrimSpace(getenv(name)) != "" && value <= 0 {
 		return 0, fmt.Errorf("mini-agent: 环境变量 %s 必须为正整数", name)
+	}
+	return value, nil
+}
+
+// nonNegativeIntEnv 读取必须非负的整型环境变量；显式配置负值视为配置非法，
+// 未配置时返回 fallback。用于「0 有明确语义（禁用）」的开关型预算。
+func nonNegativeIntEnv(getenv func(string) string, name string, fallback int) (int, error) {
+	value, err := intEnv(getenv, name, fallback)
+	if err != nil {
+		return 0, err
+	}
+	if value < 0 {
+		return 0, fmt.Errorf("mini-agent: 环境变量 %s 必须为非负整数", name)
 	}
 	return value, nil
 }

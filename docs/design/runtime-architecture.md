@@ -8,7 +8,7 @@
 
 理解实现可以先读 §7 的提交与失败语义、§8 的会话并发模型、§9 的上下文策略。§11 保留关键不变量；§12 为维护者提供文件定位表。
 
-默认启动入口是 `cmd/mini-agent`：注册 `calculator`、使用内存 Session、关闭上下文压缩。`builtin` 另有模拟搜索和 Todo 工具，`contextmgr` 另有压缩逻辑；这些模块的存在不代表默认 HTTP 服务已经接入全部能力。
+默认启动入口是 `cmd/mini-agent`：注册 `calculator`、使用内存 Session，上下文压缩默认关闭（`MINI_AGENT_CONTEXT_TOKEN_BUDGET=0`），配置正整数预算后启用。`builtin` 另有模拟搜索和 Todo 工具；这些模块的存在不代表默认 HTTP 服务已经接入全部能力。
 
 ## 2. 分层与依赖方向
 
@@ -58,11 +58,11 @@ go list -f '{{.ImportPath}} {{join .Imports " "}}' ./...
 | `tool` | `Tool` 执行契约、工具元数据、`Registry` 查找 | 具体工具实现、沙箱、权限、并发调度 |
 | `session` | Session / Todo / 摘要数据类型、`Store` 抽象，以及单进程内存 Session Manager（会话生命周期、Turn 执行权与原子提交、过期清理、Todo 生命周期） | 持久化实现、跨进程锁与多副本一致性、摘要生成算法、Agent Loop 调度 |
 | `builtin` | 五个内置工具（`calculator`、`mock_search`、`todo_create`、`todo_list`、`todo_complete`）、固定有序 Mock 数据集、`TodoOperations` 写入端口与领域错误码 | `tool.Registry` 实现、工具调度与失败回填、Todo 存储 / ID 生成 / 生命周期、网络与第三方 SDK |
-| `contextmgr` | 上下文预算、窗口选择与压缩：在估算预算内构建可送 Provider 的合法消息视图 | 生产 Summarizer（LLM 摘要适配器）、真实 tokenizer、摘要跨 Run 持久化 |
+| `contextmgr` | 上下文预算、窗口选择与压缩：在估算预算内构建可送 Provider 的合法消息视图；含确定性 `DigestSummarizer` | 语义摘要（LLM 适配器）、真实 tokenizer、摘要跨 Run 持久化 |
 | `runlog` | 运行事件模型、`Sink` 接口与结构化 JSON 记录（字段语义、脱敏与上限） | 文件落盘/滚动策略、采样、上报后端 |
 | `agent` | 一次 Run 的执行：装配参数与前置校验、上下文视图装配、LLM → Tool → LLM 循环驱动、双预算计数与触限、超时与取消中断、终态映射、整轮原子提交、运行事件接线 | Provider 与工具的具体实现、Todo 端口适配、生产 `Summarizer`、持久化、并行工具调度与性能优化、CLI / HTTP 入口 |
 | `httpapi` | HTTP 对外协议：配置与 fail-closed 校验、默认回环监听与 Bearer 认证、精确路由、有界请求读取与严格字段解析、错误码封闭枚举与 `code → status` 单点映射、请求超时、优雅关闭、`SessionStore` / `Runner` 端口定义 | 调用 Agent Loop、会话读写、Provider/工具装配、流式输出、TLS/CORS/限流/metrics、用户体系 |
-| `service` | HTTP 端口到 Agent Loop 的装配实现：一次真实 `RunTurn` 内的同 Turn 适配器、per-Run `Loop` 构造、用户消息构造、reply 提取、Run 结论到 `RunOutcome` 的映射 | HTTP 协议细节、会话实现、Todo 端口适配、生产 `Summarizer`、Provider 与工具的具体实现 |
+| `service` | HTTP 端口到 Agent Loop 的装配实现：一次真实 `RunTurn` 内的同 Turn 适配器、per-Run `Loop` 构造、上下文预算与默认 `Summarizer` 装配、用户消息构造、reply 提取、Run 结论到 `RunOutcome` 的映射 | HTTP 协议细节、会话实现、Todo 端口适配、Provider 与工具的具体实现 |
 | `cmd/mini-agent` | 可启动入口：环境变量 → 配置与依赖装配（Provider、Registry、Session Manager、Context Manager、日志 Sink）→ 监听 → 终止信号 → 优雅关闭；fail-closed 占位 `Summarizer` | 业务逻辑、协议定义、部署与发布 |
 
 ## 4. 数据模型
@@ -171,8 +171,8 @@ RUNNING ──► COMPLETED        （模型不再要求工具调用）
 - 公开契约：
   - `Request{ExecutionRef, SystemPrompt, PreviousSummary, Messages, TokenBudget, KeepRecent}`；`Result{Messages, Compacted, DroppedMessages, Summary}`；`Manager.Build(ctx, Request) (Result, error)`；`NewManager(estimator, summarizer) (Manager, error)`。
   - `Messages` 只允许 `user` / `assistant` / `tool`；System Prompt 与历史摘要通过 `SystemPrompt` / `PreviousSummary` 显式提供，`Messages` 携带 `RoleSystem` 即 `invalid_argument`。
-  - `Estimator` 接口 + 默认 `HeuristicEstimator`（4 字符/token 启发式，可注入替换）；`TokenBudget` 是**估算预算**（`<= 0` 不限制），不宣称等于真实模型 token 数；工具 Schema、模型输出等预算由调用方在视图之外预留。
-  - `Summarizer` 接口（`Summarize(ctx, SummarizeRequest) (string, error)`）产出纯文本摘要；仓库内只提供测试用 Fake。后续接入生产 LLM 适配器时，其调用需要计入 `RunPolicy`；当前尚未交付这条路径。
+  - `Estimator` 接口 + 默认 `HeuristicEstimator`：CJK 字符每字 1 token、其余 4 字符/token、每条消息固定开销 4，可注入替换；累加使用饱和加法避免溢出。`TokenBudget` 是**估算预算**（`<= 0` 不限制），不宣称等于真实模型 token 数（英文代码/JSON 仍可能低估）；工具 Schema、模型输出等预算由调用方在视图之外预留。
+  - `Summarizer` 接口（`Summarize(ctx, SummarizeRequest) (string, error)`）产出纯文本摘要。生产默认实现是 `DigestSummarizer`：确定性规则化摘录，输出不超过 `MaxRunes`（默认 400），旧摘要被解析为扁平摘录行重新参与同一预算，因此反复压缩不会嵌套、不会无限累积；不调用任何模型。需要语义摘要时注入模型适配器，其调用必须计入 `RunPolicy` 并遵守取消/超时，当前未交付。
 - 压缩语义：`TokenBudget` 为唯一触发阈值——完整视图估算未超预算时保持原样（`Compacted=false`、`DroppedMessages=0`、`Summary=""`）；超预算时按原子单元（assistant 消息携带的 ToolCalls 与其全部 ToolResults 同属一个单元）整体压缩保留尾部之前的最老历史，保留不少于 `KeepRecent` 条的近期消息。`KeepRecent` 是硬下限，不通过继续删减保留消息凑预算；单次 `Build` 只调用一次 `Summarizer`，压缩后仍超预算即 `invalid_argument`。System Prompt 始终保留；已有摘要通过 `PreviousSummary` 参与新摘要生成。
 - 跨轮次持久化（供 Session Manager 使用）：`Result.Summary` 是新摘要的权威文本；被覆盖消息恰为 `req.Messages` 的前 `DroppedMessages` 条；`Compacted=true` 时调用方以 `Summary` 全量替换旧摘要并删除前 `DroppedMessages` 条消息，`Compacted=false` 时保留旧摘要不变。`contextmgr` 不读写 Session Store。
 - 失败语义：预算不可满足（含 System Prompt、`KeepRecent` 目标、摘要本身）→ `invalid_argument`；`Summarizer` 失败或空/全空白摘要 → `internal`（保留 Cause）；输入消息结构/配对非法 → 原样返回 `core` 错误；`ctx` 取消/超时 → `cancelled` / `deadline_exceeded`。错误路径返回零值 `Result`，不返回部分视图，调用方不得据此修改持久化状态。
@@ -181,6 +181,7 @@ RUNNING ──► COMPLETED        （模型不再要求工具调用）
 - Loop 的用法（`agent`，`agent-runtime-loop-v1`）：每次模型调用前调用 `Build`，输入 `Messages` = 未被摘要覆盖的历史 + 本次 Run 已产生的消息，`PreviousSummary` = 当前摘要；`Compacted=true` 时累加 `DroppedMessages` 并把本次 `Summary` 作为下一次的 `PreviousSummary`，同一段历史不被重复摘要。
 - System Prompt 以 `llm.Request.System` 传递：视图首条 system 消息（System Prompt）不进入 `llm.Request.Messages`，摘要 system 消息仍保留在其中。
 - 压缩偏移在**提交时一次性生效**：`Summary` 覆盖旧摘要，被覆盖的消息（含本次 Run 自己产生的早期消息）不进入 Session。该前缀删除能力已由 `session-turn-drop-leading-v1` 交付（`Turn.DropLeading`，见 §8.1 / INV-017），Loop 在提交阶段调用一次；Loop 不得以重入 `Save`、绕过执行权或直接改 Session 内部数据替代。
+- 生产装配（`agent-context-production-wiring-v1`）：`service.Config.TokenBudget > 0` 启用压缩、`KeepRecent == 0` 归一为 8；`TokenBudget < 0` 或 `KeepRecent < 0` 在 `NewRunner` 拒绝。`cmd/mini-agent` 只通过 `MINI_AGENT_CONTEXT_TOKEN_BUDGET` / `MINI_AGENT_CONTEXT_KEEP_RECENT` 配置，默认预算为 0（禁用），不新增第二套 Context 配置系统。压缩在 `Contexts.Build` 内同步完成，不产生额外模型调用，因此不新增预算计数；每个 step 最多压缩一次、`head` 单调递增，`MaxLLMCalls` 天然限制压缩次数，不存在压缩循环。
 
 ## 10. 运行日志（runlog）
 
@@ -326,8 +327,10 @@ INV-017 来源：`session-turn-drop-leading-v1` 的 APPROVED `contract.md`（该
 | `contextmgr/estimator.go` | contextmgr | Estimator / HeuristicEstimator |
 | `contextmgr/summarizer.go` | contextmgr | SummarizeRequest / Summarizer |
 | `contextmgr/manager.go` | contextmgr | NewManager 与构建/压缩逻辑 |
-| `contextmgr/estimator_test.go` | contextmgr | `Estimator` / `HeuristicEstimator` 边界 |
+| `contextmgr/digest.go` | contextmgr | `DigestSummarizer`：确定性、有界、扁平的规则化摘要 |
+| `contextmgr/estimator_test.go` | contextmgr | `Estimator` / `HeuristicEstimator` 边界（含 CJK、长文本、工具字段与饱和加法） |
 | `contextmgr/manager_test.go` | contextmgr | `Build` 的预算、保留、原子单元与失败语义 |
+| `contextmgr/digest_test.go` | contextmgr | 摘要确定性、有界性、扁平合并、只引用原文、失败与取消语义 |
 | `runlog/runlog.go` | runlog | EventKind（含六个常量）/ Event（含 `Duration`、`Status`）/ Sink / Discard |
 | `runlog/slog.go` | runlog | `NewSlogSink` / `NewJSONSink`、记录构建、panic 恢复与错误返回 |
 | `runlog/sanitize.go` | runlog | 允许清单、敏感/正文/未知键规则、深度与节点上限、键序稳定遍历 |
@@ -367,6 +370,7 @@ INV-017 来源：`session-turn-drop-leading-v1` 的 APPROVED `contract.md`（该
 | `e2e/timeout_test.go` | 集成验收（仅测试） | AC-003 / AC-004 时间敏感用例：provider 无响应、HTTP 请求超时、客户端断开取消 |
 | `e2e/concurrency_test.go` | 集成验收（仅测试） | AC-006 HTTP 层并发：同会话并发、跨会话并发、并发工具调用，`-race` 干净 |
 | `e2e/offline_test.go` | 集成验收（仅测试） | AC-005 零真实 Token / 零外网的机械证据（源码扫描 + loopback 与请求计数断言） |
+| `e2e/context_test.go` | 集成验收（仅测试） | 正式 HTTP 服务的上下文压缩：可达性、历史缩减与摘要召回、工具配对、失败回滚、预算不足、并发隔离 |
 
 规则：
 
@@ -393,8 +397,8 @@ INV-017 来源：`session-turn-drop-leading-v1` 的 APPROVED `contract.md`（该
 | 会话并发与提交 | `session` / `service` / `e2e` 覆盖串行、隔离、取消及失败不提交；当前无跨实例保证 |
 | 内置工具 | 五个工具有模块测试；默认服务只注册计算器，E2E 额外注册模拟搜索 |
 | Todo 服务接入 | 尚无 `session.TodoOperations` 到 `builtin.TodoOperations` 的生产适配；未验证模型驱动的 Todo 端到端操作 |
-| 压缩 | `contextmgr` 和 `agent` 使用 Fake Summarizer 验证预算、配对和摘要提交；默认 HTTP 服务固定 `TokenBudget=0`，生产摘要器未接入 |
-| Token 估算 | 每条消息固定开销加 4 字符/token 的启发式估算；未对真实模型校准，也未覆盖工具 Schema 与输出预留 |
+| 压缩 | 模块层验证预算、配对与摘要提交；正式 HTTP 服务在 `MINI_AGENT_CONTEXT_TOKEN_BUDGET > 0` 时使用默认 `DigestSummarizer` 真实压缩（`e2e/context_test.go`），默认预算为 0 即不压缩 |
+| Token 估算 | 每条消息固定开销 + CJK 每字 1 token + 其余 4 字符/token 的启发式；未对真实模型校准，也未覆盖工具 Schema 与输出预留，生产配置需留余量 |
 | 存储 | 内存 Session，退出丢失；默认 TTL 为 0，无自动过期清理 |
 | 模型访问 | OpenAI 兼容 Chat Completions，已有 TokenHub 验收记录；无自动重试或流式输出，不保证兼容所有服务商扩展 |
 | HTTP | 端点、认证、错误映射、取消与关闭有测试；客户端断连时无法保证错误响应送达 |

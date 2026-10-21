@@ -455,6 +455,9 @@ type harnessOptions struct {
 	requestTimeout  time.Duration
 	providerTimeout time.Duration
 	toolTimeout     time.Duration
+	// tokenBudget / keepRecent 透传 service.Config：> 0 时启用上下文压缩。
+	tokenBudget int
+	keepRecent  int
 }
 
 // harness 是一次完整验收装配。
@@ -509,6 +512,8 @@ func newHarness(t *testing.T, opts harnessOptions) *harness {
 		MaxLLMCalls:  opts.maxLLMCalls,
 		MaxToolCalls: opts.maxToolCalls,
 		ToolTimeout:  opts.toolTimeout,
+		TokenBudget:  opts.tokenBudget,
+		KeepRecent:   opts.keepRecent,
 	})
 	if err != nil {
 		t.Fatalf("构造 service.Runner 失败：%v", err)
