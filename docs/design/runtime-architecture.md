@@ -359,12 +359,19 @@ INV-017 来源：`session-turn-drop-leading-v1` 的 APPROVED `contract.md`（该
 | `service/runner_test.go` | service | 真实 `agent.Loop` + Fake Provider/Tool + 真实 `session.Manager`：多轮、工具链路、无半轮、恰好一次 `RunTurn` |
 | `cmd/mini-agent/main.go` | cmd | 环境变量 → 装配 → 监听 → 终止信号 → 优雅关闭；可测入口 `run` |
 | `cmd/mini-agent/main_test.go` | cmd | 启动/就绪/非法配置 fail-closed/关闭幂等 |
+| `e2e/harness_test.go` | 集成验收（仅测试） | 离线全链路装配：scripted OpenAI 兼容 loopback 服务、真实 `openai.Client` / `session.Manager` / `builtin` 工具、只读透传的 `recordingRunner`、`runlog` 事件捕获与断言辅助 |
+| `e2e/chat_test.go` | 集成验收（仅测试） | AC-001 单请求多工具连续执行；AC-002 同会话记忆与跨会话隔离（含 Session 预置 `Todos` / `Summary` 快照对比） |
+| `e2e/failure_test.go` | 集成验收（仅测试） | AC-003 可恢复工具失败回填继续；AC-004 provider 4xx/5xx、`MaxLLMCalls` / `MaxToolCalls` 耗尽与无半轮提交 |
+| `e2e/timeout_test.go` | 集成验收（仅测试） | AC-003 / AC-004 时间敏感用例：provider 无响应、HTTP 请求超时、客户端断开取消 |
+| `e2e/concurrency_test.go` | 集成验收（仅测试） | AC-006 HTTP 层并发：同会话并发、跨会话并发、并发工具调用，`-race` 干净 |
+| `e2e/offline_test.go` | 集成验收（仅测试） | AC-005 零真实 Token / 零外网的机械证据（源码扫描 + loopback 与请求计数断言） |
 
 规则：
 
 - 每个源文件只归属一个模块；同一模块的后续维护任务才能修改其文件。
 - 实现确需新增或重命名文件时，必须在同一交付内回写本表；表内路径与实际 `git ls-files` 不一致视为 AC-006 失败。
 - 禁止在模块目录外新增业务源码；禁止跨模块混放（如把 `tool` 接口写进 `core`）。
+- `e2e/` 是**仅测试包**（`package e2e_test`，只含 `*_test.go`），不属于 §2 的生产分层：`go list .Imports` 为空（模块内依赖落在 `.XTestImports`），`go build ./...` 跳过该目录；`go build ./e2e` 单包会报 `no non-test Go files`，属预期行为，不视为仓库构建失败。禁止在其中新增非测试文件、生产导出符号或把验收逻辑改写成生产代码。
 
 ## 13. 工程入口
 
@@ -388,6 +395,7 @@ INV-017 来源：`session-turn-drop-leading-v1` 的 APPROVED `contract.md`（该
 - `session` 内存实现无持久化，进程重启数据丢失是既定行为，不做恢复验证。
 - HTTP 服务的运行期行为（端点契约、认证与监听边界、错误码映射、取消/超时穿透、优雅关闭）在 T09 交付后由 `httpapi` / `service` / `cmd` 测试与 Cleaner 核对证明；客户端断开时响应不可达，无法验证客户端实际收到的状态码。
 - v1 服务禁用上下文压缩（`TokenBudget=0`）且不注册 Todo 工具：长会话触达 Provider 限制时以 `provider_failure` 结束，属既定边界而非缺陷。
+- 端到端验收的边界（`agent-runtime-e2e-tests-v1`，Owner 批准 D1–D4）：HTTP 层触发 `todo_*` 与上下文压缩在 v1 装配下不可达（`service.Config` 拒绝 `TokenBudget != 0`，v1 registry 不注册 Todo 工具），因此该任务只以 Session 预置数据的快照对比证明跨会话隔离与失败不回滚，**不做 Todo 端到端宣称**；Todo 端到端行为、`session.TodoOperations` → `builtin.TodoOperations` 适配与生产 `Summarizer` 仍归服务装配任务（T08）。同时确认：`e2e/` 装配的 registry 为 `calculator` + `mock_search`，与 `cmd/mini-agent` 的 v1 生产 registry（仅 `calculator`）不同，证据只覆盖 Runtime 能力而非生产注册集合等价；该任务的失败三元组矩阵记录在任务 Contract 与交付记录中，本节不重复，也不因此修改 §7。
 
 归属后续任务：
 
