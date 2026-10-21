@@ -66,12 +66,20 @@ GOWORK=off go -C .agent/engine test ./...
 GOWORK=off go -C .agent/engine test -race ./...
 ```
 
-- 业务模块：当前仓库根尚无 `go.mod`，也没有 `Makefile`。新增业务模块时，在本节 materialize 真实的 build / test 命令。
+- 业务模块：仓库根为 `module cnb.cool/framework-station/mini-agent-go`（`go 1.24`，零第三方依赖），入口 `cmd/mini-agent`。统一入口是 `Makefile`：
+
+```text
+make build   # 产出 bin/mini-agent
+make test    # go test -count=1 ./...
+make vet     # go vet ./...
+make ci      # build + vet + test + test -race（CI 与本地同款）
+make up      # 容器化启动（依赖 Docker Compose）
+```
 
 ### CI
 
-- `.cnb.yml` 在 `main` 与 `develop` 上触发。
-- 现有 `pr-check` 阶段执行 `make test`；当前仓库没有 `Makefile`，该命令暂无对应目标（既有缺口，未在本轮 Workflow 部署中扩展 CI）。
+- `.cnb.yml` 在 `main`、`develop` 及其他分支上触发：任意分支 push 与 PR 只执行 `make ci`；只有 `main` 的 push 在检查通过后才构建并推送镜像。
+- 镜像版本由仓库根 `VERSION` 文件 + 提交短 SHA 生成（`v<VERSION>-<CNB_COMMIT_SHORT>`），镜像路径由 CNB 内置变量 `CNB_DOCKER_REGISTRY` / `CNB_REPO_SLUG_LOWERCASE` 推导，不写死仓库地址。
 
 ### 共享资源
 
