@@ -2,27 +2,27 @@ schema_version: 3
 task_id: provider-timeout-classification-v1
 
 contract:
-  status: PENDING
-  target: ""
+  status: APPROVED
+  target: "34b1505a4b329f4e6c480f8ad0aca8876cd43401"
 
 resources:
   reservations: {}
 
 review:
-  status: NOT_REQUESTED
-  target: ""
+  status: CLEAN
+  target: "43ce197ee61ff00ac5b78ec866beae1b42c4bfaf"
 
 owner:
-  status: PENDING
-  review_target: ""
+  status: ACCEPTED
+  review_target: "43ce197ee61ff00ac5b78ec866beae1b42c4bfaf"
 
 delivery:
-  status: NOT_RUN
-  review_target: ""
-  feature_head: ""
-  develop_base: ""
+  status: PASS
+  review_target: "43ce197ee61ff00ac5b78ec866beae1b42c4bfaf"
+  feature_head: "c5960015262751e388852088f6927da4709090a7"
+  develop_base: "0977f243df0348fa5e526b8d954e3f9a2720237d"
 
 blocked:
-  active: true
-  by: "TaskBuilder"
-  reason: "本任务的目标 feature branch 未由 Owner 提供（本地与远端均无），无法建立独立基线；当前 checkout 属 agent-runtime-e2e-tests-v1 且工作区含其未跟踪 e2e/，不得在本分支开工。"
+  active: false
+  by: "Analyst"
+  reason: "TaskBuilder 已按 Owner D3 完成 task.md 的 Design Impact=UPDATE（53248a4）；Contract 已登记 APPROVED（A1=34b1505）且 docs/design/http-api.md §4 已落库（aa2f6e2），阻塞解除。"
