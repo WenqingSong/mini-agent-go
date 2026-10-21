@@ -1,110 +1,78 @@
-# AI 辅助开发记录（mini-agent-go）
+# AI 辅助开发记录
 
-> 本文件记录本项目如何使用 AI Agent 完成需求、决策与实现，以及每条记录的可核对证据。
-> 它不是长期设计事实源：架构与协议仍以 `docs/design/runtime-architecture.md`、`docs/design/http-api.md` 为准。
-> 记录原则：只写仓库内可核对的事实；没有留档的内容显式标注「无记录」，不补写、不转述、不推测。
+本项目使用 AI Agent 辅助任务拆分、方案整理、编码、测试与审查。开发者负责需求、关键方案决策和最终接受；仓库通过任务、决策、审查记录和 Git 提交保存过程证据。
 
-## 1. 输入来源
+本文选取实际发生的问题，说明如何约束和验证 AI 产出。通用角色提示词与项目内 Agent Runtime 分属开发过程和运行产品两部分；业务模块不依赖 `.agent/engine`。
 
-### 1.1 角色提示词
+## 提示词与任务输入
 
-Agent 的行为约束来自仓库内的角色提示词，每次任务按角色加载，不在聊天里临时发明：
+仓库保留了六类角色提示词：
 
-| 角色 | 提示词路径 | 主要职责 |
-| --- | --- | --- |
-| Task Builder | `.agent/roles/TaskBuilderPrompt.md` | 把 Owner 需求整理为可验收任务（Goal / Scope / AC） |
-| Analyst | `.agent/roles/AnalystAgent.md` | 技术契约、方案对比与 Design Impact 判定 |
-| Coder | `.agent/roles/CoderAgent.md` | 按已批准 Contract 实现代码与测试 |
-| Cleaner | `.agent/roles/CleanerAgent.md` | 独立审查实现，输出 Findings 与审查结论 |
-| Owner Gate | `.agent/roles/OwnerGateAgent.md` | 向 Owner 呈现核心机制与决定点，机械落库 Owner 决定 |
-| Deliverer | `.agent/roles/DelivererAgent.md` | 交付验收、集成与里程碑结论 |
+| 输入 | 来源 |
+| --- | --- |
+| 任务定义 | [TaskBuilderPrompt.md](../.agent/roles/TaskBuilderPrompt.md) |
+| 方案与约束分析 | [AnalystAgent.md](../.agent/roles/AnalystAgent.md) |
+| 编码与修复 | [CoderAgent.md](../.agent/roles/CoderAgent.md) |
+| 实现及测试审查 | [CleanerAgent.md](../.agent/roles/CleanerAgent.md) |
+| 核心机制与开发者决策 | [OwnerGateAgent.md](../.agent/roles/OwnerGateAgent.md) |
+| 运行验收 | [DelivererAgent.md](../.agent/roles/DelivererAgent.md) |
 
-配套规范：`.agent/specs/AgentCollaborationSpecification.md`（协作与 Git 权限）、`.agent/specs/Five-AgentResponsibilityBoundary.md`（职责边界）、`.agent/workflow.yaml`（机器配置）、`docs/design/agent-workflow.md`（Workflow 架构）。角色提示词位于仓库内，本文件只引用路径，不复述全文。
+例如，Coder 提示词中的实际约束是：
 
-### 1.2 Owner 任务需求
+> 关键业务不变量至少有一个能区分正确与错误实现的测试；
 
-每个任务的需求都先落库为 `.agent/tasks/<task_id>/task.md`，再进入决策与实现。任务事实（状态、绑定 SHA）在 `.agent/tasks/<task_id>/state.yaml`，Owner 决定在 `owner-decision.md`，审查结论在 `findings.md`，交付结论在 `delivery.md`。
+> 禁止删除或 Skip 失败测试、放宽关键断言、忽略错误，或 Mock 掉本次真正需要验证的行为来制造 `PASS`。
 
-任务编号在历史任务文件中存在漂移（例如 `llm-openai-client-v1` 在不同任务文件里被写作 T01 或 T02；Agent Loop 一度被预留为 T01，实际交付编号为 T07）。为避免二次编造，本文件以**任务 slug** 为主键，只在任务文件明确记录时附编号。
+具体任务通过 `.agent/tasks/<task-id>/task.md` 提供目标、范围和验收条件；有设计取舍时用 `contract.md` 保存决定，审查发现保存在 `findings.md`。这些是仓库内已留档的指令与结论，完整聊天逐字记录和当时使用的开发模型版本没有归档。
 
-## 2. 使用记录
+任务编号在计划与实际记录中存在差异，以下使用任务名称和文件路径定位，不用编号推断交付顺序或完成状态。
 
-字段说明：
+## 案例一：Provider 超时被 HTTP 层重新分类
 
-- 「决策证据」＝ 该任务的技术契约（`contract.md`）或 Owner 决定（`owner-decision.md`）的落库 commit；任务的 `state.yaml` 中 `contract.target` / `owner.review_target` 指向同一批 SHA。
-- 「实现 commit」＝ 该任务的实现提交链，按时间顺序写「首轮 C1 → 后续修复」；**格内最后一个 SHA 是该任务最终被 Owner 接受的实现快照**，必须等于该任务 `state.yaml` 的 `review.target`（与 `owner.review_target` / `delivery.review_target` 相同）。首轮 C1 被后续提交取代时，必须在该格内标明它已失效/已被取代，不得把已失效的 C1 呈现为交付实现。
-- 「集成」＝ 合并入 `develop` 的 merge commit；无 merge commit 表示直接提交在 `develop` 上。
+**问题。** 模型客户端自身超时后，Agent 已把运行结果归为 `FAILED / provider_failure`。HTTP 层却先沿错误链查找 `context.DeadlineExceeded`，把它改成 `504 deadline_exceeded`，导致响应、Run 终态和日志表达不同结论。
 
-| 任务 slug | 编号（任务文件记录） | 需求 | 决策证据 | 实现 commit | 集成 | 结果 |
-| --- | --- | --- | --- | --- | --- | --- |
-| `runtime-core-contracts-v1` | T00 | [task.md](../.agent/tasks/runtime-core-contracts-v1/task.md) | [contract.md](../.agent/tasks/runtime-core-contracts-v1/contract.md)（Selected Design §1—§9）`6d7aebe` | `b4b9573` | 直接提交在 `develop`（无 merge commit） | CLEAN / ACCEPTED / delivery PASS（`6902d24`） |
-| `llm-openai-client-v1` | 未记录（部分任务文件称 T02，但 T02 亦被 `tool-registry-executor-v1` 使用） | [task.md](../.agent/tasks/llm-openai-client-v1/task.md) | Contract `NOT_REQUIRED`；[owner-decision.md](../.agent/tasks/llm-openai-client-v1/owner-decision.md) | `5633001`，修复 `b3d2146`（CLEAN-002） | `492c88d` | CLEAN / ACCEPTED / delivery PASS |
-| `tool-registry-executor-v1` | T02 | [task.md](../.agent/tasks/tool-registry-executor-v1/task.md) | [contract.md](../.agent/tasks/tool-registry-executor-v1/contract.md) `95e10b2`；[owner-decision.md](../.agent/tasks/tool-registry-executor-v1/owner-decision.md)（CL-001 / CL-002） | `707cb71`，修复 `03dced5` | `4106722` | CLEAN / ACCEPTED / delivery PASS |
-| `builtin-agent-tools-v1` | T03（该任务 `task.md` 自述 T03） | [task.md](../.agent/tasks/builtin-agent-tools-v1/task.md) | [contract.md](../.agent/tasks/builtin-agent-tools-v1/contract.md)（D1—D4、D7②）`786d6fd` | `9206897` | `7e0e6ba` | CLEAN / ACCEPTED / delivery PASS |
-| `agent-session-manager-v1` | T04 | [task.md](../.agent/tasks/agent-session-manager-v1/task.md) | [contract.md](../.agent/tasks/agent-session-manager-v1/contract.md)（D1—D6）`5263d2f` | `f23082a` | `73fef46` | CLEAN / ACCEPTED / delivery PASS |
-| `agent-context-manager-v1` | T05 | [task.md](../.agent/tasks/agent-context-manager-v1/task.md) | [contract.md](../.agent/tasks/agent-context-manager-v1/contract.md) `05544f9`；R1 修订 `8e84932`（CLEAN-005） | `d92ada3`（首轮 C1，已失效），修复 `bb991c1`（C1'）、`61fa094`（C1''，= `review.target`） | `7437e0d` | CLEAN / ACCEPTED / delivery PASS |
-| `runtime-observability-v1` | T06 | [task.md](../.agent/tasks/runtime-observability-v1/task.md) | [contract.md](../.agent/tasks/runtime-observability-v1/contract.md) `6b68fc8` | `08cd0ac`（首轮 C1，已失效：CLEAN-001 导致 `CHANGES_REQUIRED`），修复 `8e4d2fd`（= `review.target`） | `dc734d2` | CLEAN / ACCEPTED / delivery PASS |
-| `session-turn-drop-leading-v1` | 无编号（T07 前置依赖） | [task.md](../.agent/tasks/session-turn-drop-leading-v1/task.md) | [contract.md](../.agent/tasks/session-turn-drop-leading-v1/contract.md) `bcc8e96` | `2ed50f1` | `635e311` | CLEAN / ACCEPTED / delivery PASS |
-| `agent-runtime-loop-v1` | T07 | [task.md](../.agent/tasks/agent-runtime-loop-v1/task.md) | [contract.md](../.agent/tasks/agent-runtime-loop-v1/contract.md)（D1—D5）`4918efa` | `e9dd3da` | `6bebdda` | CLEAN / ACCEPTED / delivery PASS |
-| T08（保留编号：Todo 端口适配 + 生产 `Summarizer`） | T08 | 无记录（任务未创建） | 无记录 | 无记录 | 无记录 | 未交付 |
-| `agent-http-api-v1` | T09 | [task.md](../.agent/tasks/agent-http-api-v1/task.md) | [contract.md](../.agent/tasks/agent-http-api-v1/contract.md)（D1—D7）`46d871d` | `3ce1869` | `d54c912` | CLEAN / ACCEPTED / delivery PASS |
-| `agent-project-docs-v1` | T10 | [task.md](../.agent/tasks/agent-project-docs-v1/task.md) | Contract `NOT_REQUIRED`（Complexity NORMAL、Design Impact NONE） | 见该任务 `state.yaml` 的 `review.target`（Evidence Commit C1） | 待 Owner 与 Deliverer 流程 | 实现完成，待审查 |
+**任务输入。** [任务说明](../.agent/tasks/provider-timeout-classification-v1/task.md)要求同时保护两条路径：已有 Run 结论时按它的错误种类映射；尚未形成结论的请求级取消/超时保留原有响应。修复范围限定在 HTTP 错误分类，不重构 Provider 或 Loop。
 
-补充说明（与上表一一对应，均为仓库内可核对事实）：
+**修复与验证。** [httpapi/errors.go](../httpapi/errors.go)优先识别已有 `RunError`，然后才用裸 Context 错误兜底。[集成测试](../httpapi/handler_test.go)同时断言 HTTP 错误、运行终态、日志和会话快照。历史审查还临时恢复错误判定顺序，确认回归测试会失败。
 
-- 多数任务都经历了「Cleaner 提 Finding → Coder 修复 → Cleaner 复审」的循环。「实现 commit」列按时间顺序列出实现与修复提交，最后一个 SHA 即最终接受快照（= 各任务 `state.yaml` 的 `review.target`）；被取代的首轮 C1 在该格内明确标注为已失效，完整链路见各任务 `findings.md`。
-- 每个任务在实现前都先把决策落库（Contract 或 Owner 决定），实现 commit 不含决策改写。例外是 `runtime-core-contracts-v1`：它本身就是契约层任务，决策文档与代码同属一次交付。
-- 所有任务都以「真实命令 + 真实结果」记录验证，未执行项在 `delivery.md` 中标注为未验证，不以「测试通过」替代真实 Provider 验收。
+证据：[技术契约](../.agent/tasks/provider-timeout-classification-v1/contract.md) · [审查与修复记录](../.agent/tasks/provider-timeout-classification-v1/findings.md) · [核心验证说明](../.agent/tasks/provider-timeout-classification-v1/core-logic.md)；修复提交 `43ce197`。
 
-## 3. 技术决策记录
+**经验。** 多层错误包装需要明确谁负责最后分类；保留 `Cause` 供诊断，并不意味着下游可以覆盖已经确定的运行结论。
 
-长期设计事实与其决策来源的对应关系。左边是 `docs/design/*` 中已固化的取舍，右边是形成该取舍的任务内决策记录。
+## 案例二：上下文预算挤掉必须保留的近期消息
 
-| 长期设计事实 | 落点 | 决策来源 |
-| --- | --- | --- |
-| 分层与依赖方向（L0 `core` / L1 抽象 / L2 `builtin` / L3 装配） | `runtime-architecture.md` §2、§3、§12 | `runtime-core-contracts-v1/contract.md` Selected Design §1、§8；T09 追加 L3 入口：`agent-http-api-v1/contract.md` D7（`46d871d`） |
-| 消息是单一 struct + 类型化可选字段；配对不变量 INV-002 | `runtime-architecture.md` §4、§7 | `runtime-core-contracts-v1/contract.md` §2、§3 |
-| 运行状态机：四个终态互斥，`COMPLETED` 无错误 | `runtime-architecture.md` §5 | `runtime-core-contracts-v1/contract.md` §3；`finish_reason` 判定细化见 `agent-runtime-loop-v1/contract.md` D5 |
-| 双预算按类别计数、发出前预检、非正值即契约错误 | `runtime-architecture.md` §6 | `runtime-core-contracts-v1/contract.md` §4；`agent-runtime-loop-v1/contract.md` D3 |
-| 提交边界：仅 `COMPLETED` 整轮提交，其余整轮丢弃 | `runtime-architecture.md` §7「提交边界」、§11.1 | `agent-runtime-loop-v1/contract.md` D1（Owner 批准） |
-| 会话归属与能力注入（Tool 不持会话状态副本） | `runtime-architecture.md` §8、INV-005 | `builtin-agent-tools-v1/contract.md` D1 / D7②；`agent-session-manager-v1/contract.md` D1—D6 |
-| 内存 Session Manager：会话串行、Turn 原子提交、惰性过期、前缀删除 INV-017 | `runtime-architecture.md` §8.1、§11.1 | `agent-session-manager-v1/contract.md`（D1—D6）；`session-turn-drop-leading-v1/contract.md`（`DropLeading` 语义） |
-| 单工具失败分类、执行前把关、同 Run 去重 | `runtime-architecture.md` §7、§11 INV-009—INV-013 | `tool-registry-executor-v1/contract.md`；`owner-decision.md` CL-001 / CL-002（含去重生命周期交由装配层落实的决定） |
-| 内置工具协议：会话作用域只取 `req.SessionID`、领域失败不进 `RunError` | `runtime-architecture.md` §8.1、§11.1 INV-B01—INV-B09 | `builtin-agent-tools-v1/contract.md` D2—D4 |
-| 上下文压缩：原子单元、`KeepRecent` 硬下限、单次 `Build` 只调用一次 `Summarizer` | `runtime-architecture.md` §9 | `agent-context-manager-v1/contract.md`；R1 修订 `8e84932`（CLEAN-005） |
-| 运行日志：观察者旁路、固定 JSON 字段、允许清单脱敏与上限 | `runtime-architecture.md` §10 | `runtime-observability-v1/contract.md`（含 Owner Decision Record） |
-| HTTP 对外契约：三端点、错误码封闭枚举与 `code → status` 单点映射、取消/超时语义、认证与默认回环、生命周期 | `http-api.md` §3—§9 | `agent-http-api-v1/contract.md` D1—D7（`46d871d`） |
-| v1 边界：`TokenBudget = 0` 不压缩、不注册 Todo 工具、`Summarizer` 占位 | `http-api.md` §8、§10；`runtime-architecture.md` §14 | `agent-http-api-v1/contract.md`（D7 与 Owner 边界裁定） |
+**问题。** 压缩后的上下文仍超过预算时，早期实现继续缩减保留内容，可能违反 `KeepRecent` 的下限要求。只验证最终长度是否低于预算，无法发现近期记忆被静默丢弃。
 
-约束：以上取舍的变更必须走 Contract Revision 并由 Owner 重新批准，再回写 `docs/design/*`；`docs/design/*` 是唯一长期权威，任务文件只记录决策过程与证据。
+**约束修订。** [Context Manager 契约](../.agent/tasks/agent-context-manager-v1/contract.md)明确 `KeepRecent` 按消息条数计算，并且是硬下限。工具调用与全部对应结果组成原子单元，因此实际保留条数可以更多。单次构建只生成一次摘要，仍装不下则明确失败。
 
-## 4. 无记录项
+**修复与验证。** [contextmgr/manager.go](../contextmgr/manager.go)按约束选择保留尾部，再压缩前缀。[测试](../contextmgr/manager_test.go)覆盖恰好装下、少一个 token、超长近期消息和工具配对。审查记录包含临时改变计数方式、放宽预算校验等变异验证，确认断言能识别错误实现。
 
-以下内容在本仓库中**没有留档**，本文件不作补写、不推测原文，也不把未执行的动作写成已执行：
+证据：[CLEAN-001 至 CLEAN-005](../.agent/tasks/agent-context-manager-v1/findings.md)；契约修订 `8e84932`，行为与测试修复 `bb991c1`、`61fa094`。
 
-- Owner 与各 Agent 的对话逐字记录：无记录。仓库只落库结论（`task.md` / `contract.md` / `owner-decision.md` / `findings.md` / `delivery.md` / `state.yaml`）。
-- 执行这些任务时使用的具体模型名称与版本：无记录。
-- 真实 Provider 调用记录与真实 API Key：无记录，且从未执行（见 `http-api.md` §10、`runtime-architecture.md` §14）。
-- 各任务中 Agent 的完整工具调用轨迹（读了哪些文件、执行了哪些命令的逐条日志）：无记录；可核对的只有提交后的代码、测试与上述文档。
-- T08（Todo 端口适配 + 生产 `Summarizer`）：无记录，任务目录、Contract 与实现均不存在；`runtime-architecture.md` §14 与 `http-api.md` §10 仍将其列为后续归属。
-- `.agent/tasks/*/findings.md` 之外的审查过程细节（例如临时 worktree、一次性验证脚本）：无记录。
+**经验。** “不超预算”和“保留必要记忆”是两个需要同时验证的约束。当前该能力已在模块中实现，但默认 HTTP 服务仍关闭压缩，不能把模块验收写成服务已启用。
 
-## 5. 复核方式
+## 案例三：空模型消息被当成成功回答
 
-任一条记录都可以用下面几条命令独立核对：
+**问题。** Go 将 JSON `null` 解码到结构体时会留下零值。早期实现因此把 `choices[0].message=null` 当成空 assistant 消息，并接受 `finish_reason=stop`。
+
+**修复与验证。** [响应解析](../llm/openai/wire.go)改用指针解码，拒绝缺失、null 或非对象 message；同时保留合法的 `content:null + tool_calls`。`TestCompleteErrorSemantics` 增加反例，`TestCompleteResponseParsing` 保护工具调用兼容性。历史审查回退解析代码后，新测试失败。
+
+证据：[审查记录 CLEAN-002](../.agent/tasks/llm-openai-client-v1/findings.md) · [测试代码](../llm/openai/client_test.go)；修复提交 `b3d2146`。
+
+**经验。** 协议字段的“缺失”“null”“空值”和“合法工具调用响应”需要分别测试，仅凭解码不报错不能认定响应有效。
+
+## 记录范围与复核
+
+上述问题与修复来自仓库记录，未补写不存在的对话或 Prompt。文中的提示词节选来自实际角色文件；案例描述是对任务和审查记录的整理，不是当时聊天原文。
+
+真实模型验收后来已经完成，来源见[测试与验收](verification.md)。验收使用的模型名称不等于开发时使用的 AI 模型；后者未留档。真实密钥不属于应提交的开发记录。
+
+需要追溯某次修复时，可在仓库中执行：
 
 ```bash
-# 决策与实现 commit 是否存在，以及它们的标题
-git cat-file -e <sha>^{commit} && git log -1 --format='%h %s' <sha>
-
-# 某任务涉及的全部提交
-git log --oneline --all -- .agent/tasks/<task_id>
-
-# 集成到 develop 的 merge 记录
-git log --merges --oneline develop
-
-# 任务的真实状态（contract / review / owner / delivery 绑定）
-cat .agent/tasks/<task_id>/state.yaml
+git show --stat 43ce197
+git show --stat bb991c1
+git show --stat b3d2146
 ```
 
-核对结论与本次文档交付的一致性由 Cleaner 与 Owner 判定；本文件不宣布审查通过，也不代替 Owner 的接受决定。
+完整任务材料位于 [.agent/tasks](../.agent/tasks/)；协作规则入口为 [AGENTS.md](../AGENTS.md)，详细 [Workflow 设计](design/agent-workflow.md)保留供需要了解开发流程的读者查阅。

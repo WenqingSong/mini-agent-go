@@ -1,15 +1,14 @@
-# Runtime 核心架构（mini-agent-go）
+# Runtime 架构
 
-> 本文件是项目级长期设计事实（WHY / architecture）：模块边界、依赖方向、数据模型、状态机、不变量、失败语义与文件所有权。
-> 任务内的决策过程与逐条接口契约见 `.agent/tasks/runtime-core-contracts-v1/contract.md`（契约层）与 `.agent/tasks/builtin-agent-tools-v1/contract.md`（内置工具，Owner `APPROVED`，Evidence Commit A1）。
-> 两者冲突时：Contract 记录本任务已确认的取舍，本文件记录跨任务长期事实；出现不一致必须回写，不允许长期漂移。
-> 本文件中 `contextmgr` 的实现级契约由 `.agent/tasks/agent-context-manager-v1/contract.md` 落实（Owner `APPROVED`，Evidence Commit A1 = `624a094`）。
+本文说明当前实现的模块边界、状态、会话提交、工具执行和上下文管理。运行示例见 [README](../../README.md)，证据范围见[测试与验收](../verification.md)。
 
-## 1. 范围
+## 1. 阅读入口与实现范围
 
-本文件描述 Runtime 的架构基线：L0 `core` 契约层、五个 L1 抽象包与 L2 `builtin` 内置工具包，供 Agent Loop、Provider、Session 持久化、Context 管理、运行日志与装配层共同依赖。
+一次 HTTP 对话的调用顺序是：`httpapi.handleChat → service.Runner.Run → session.Manager.RunTurn → agent.Loop.Run → contextmgr.Build → llm.Provider.Complete → tool.Executor.Execute`。工具结果回填后再次调用模型，正常结束后由外层 Turn 提交。
 
-不在本文件范围：具体 Provider 协议、工具沙箱与权限、持久化选型（DB / Redis）、CLI / HTTP 入口、部署流水线。
+理解实现可以先读 §7 的提交与失败语义、§8 的会话并发模型、§9 的上下文策略。§11 保留关键不变量；§12 为维护者提供文件定位表。
+
+默认启动入口是 `cmd/mini-agent`：注册 `calculator`、使用内存 Session、关闭上下文压缩。`builtin` 另有模拟搜索和 Todo 工具，`contextmgr` 另有压缩逻辑；这些模块的存在不代表默认 HTTP 服务已经接入全部能力。
 
 ## 2. 分层与依赖方向
 
@@ -70,7 +69,7 @@ go list -f '{{.ImportPath}} {{join .Imports " "}}' ./...
 
 - 消息是**单一 struct**（`core.Message`）+ 类型化可选字段，不是 content-part 接口多态：`Role`、`Content []ContentPart`、`ToolCalls []ToolCall`、`ToolResult *ToolResult`、`Raw json.RawMessage`。
 - 正文统一为 `ContentPart`，当前仅支持文本类型；多模态通过新增 `ContentType` 扩展，不改变 struct 形态。
-- `Raw` 保存 Provider 原始载荷，用于日志与回放，契约层不解析。
+- `Raw` 保存 Provider 原始载荷，契约层不解析。当前不会将它写入运行日志、返回 HTTP 客户端或原样回传下一次模型请求；未实现运行回放。
 - 工具调用与结果通过 `ToolCall.ID` / `ToolResult.CallID` 配对；结果是独立的 `RoleTool` 消息，一条消息只承载一个结果，多结果即多条消息。
 - 参数 `ToolCall.Arguments` 保持原始 JSON，契约层不解析、不改写，避免在公共契约里绑定 provider 的 schema 语义。
 
@@ -92,7 +91,7 @@ RUNNING ──► COMPLETED        （模型不再要求工具调用）
         └─► CANCELLED        （cancelled / deadline_exceeded）
 ```
 
-- `RUNNING` 是非终态，唯一不带错误的运行状态。
+- `RUNNING` 是非终态；`RUNNING` 与正常终态 `COMPLETED` 都不带错误。
 - 四个终态都是“结果”，但语义互斥：不得把取消、超时、预算耗尽归类为工具失败，也不得把预算耗尽伪装成正常完成。
 - 「工具失败」不作为独立状态：可恢复工具失败不是终态（通过 `ToolResult.IsError` 回填模型），只有不可恢复且终止 Run 的工具错误才产生 `FAILED + tool_failure`。
 - 状态与错误的一致性逐状态校验，不使用“所有终态都必须有错误”的笼统规则：`COMPLETED` 必须无错误；`FAILED` / `LIMIT_EXCEEDED` / `CANCELLED` 必须带匹配的 `ErrorKind`。
@@ -164,7 +163,7 @@ RUNNING ──► COMPLETED        （模型不再要求工具调用）
 - 模型不得经 JSON 参数选择会话：`Arguments` 中出现 `session_id` / `sessionId` / `session` 一律 `invalid_arguments`。
 - Todo 工具不持有 Todo 状态副本、不生成 ID、不做读改写：`Create` / `List` / `Complete` 的会话作用域、ID 生成、状态迁移与幂等「完成」全部由注入的 `builtin.TodoOperations` 实现方完成；端口以 `builtin.ErrTodoNotFound` 表示「本会话不存在该待办」。
 - 失败分级：领域失败返回 `core.ToolResult{IsError: true}` 且 `error` 为 nil，内容为 `{"error":{"code","message"}}`；基础设施失败（端口返回非领域错误、`ctx` 已结束、端口未注入）返回 `*core.RunError`，原始错误只进 `Cause`，不得回显内部细节。
-- 服务装配任务（T08）负责把 `session.TodoOperations` 适配成 `builtin.TodoOperations`，并承担 Todo ID 生成与状态迁移；`builtin` 不 import `session` 的实现，`session` 也不 import `builtin`。
+- 后续服务装配需要把 `session.TodoOperations` 适配成 `builtin.TodoOperations`，并承担 Todo ID 生成与状态迁移；`builtin` 不 import `session` 的实现，`session` 也不 import `builtin`。
 
 ## 9. 上下文管理（contextmgr）
 
@@ -173,8 +172,8 @@ RUNNING ──► COMPLETED        （模型不再要求工具调用）
   - `Request{ExecutionRef, SystemPrompt, PreviousSummary, Messages, TokenBudget, KeepRecent}`；`Result{Messages, Compacted, DroppedMessages, Summary}`；`Manager.Build(ctx, Request) (Result, error)`；`NewManager(estimator, summarizer) (Manager, error)`。
   - `Messages` 只允许 `user` / `assistant` / `tool`；System Prompt 与历史摘要通过 `SystemPrompt` / `PreviousSummary` 显式提供，`Messages` 携带 `RoleSystem` 即 `invalid_argument`。
   - `Estimator` 接口 + 默认 `HeuristicEstimator`（4 字符/token 启发式，可注入替换）；`TokenBudget` 是**估算预算**（`<= 0` 不限制），不宣称等于真实模型 token 数；工具 Schema、模型输出等预算由调用方在视图之外预留。
-  - `Summarizer` 接口（`Summarize(ctx, SummarizeRequest) (string, error)`）产出纯文本摘要；仓库内只提供测试用 Fake，生产 LLM 适配器归服务装配任务（T08）且其调用计入 `RunPolicy`。
-- 压缩语义：`TokenBudget` 为唯一触发阈值——完整视图估算未超预算时保持原样（`Compacted=false`、`DroppedMessages=0`、`Summary=""`）；超预算时按原子单元（assistant 消息携带的 ToolCalls 与其全部 ToolResults 同属一个单元）整体压缩保留尾部之前的最老历史，保留不少于 `KeepRecent` 条的近期消息。`KeepRecent` 是硬下限，不通过继续删减保留消息凑预算；单次 `Build` 只调用一次 `Summarizer`，压缩后仍超预算即 `invalid_argument`。System Prompt 与摘要永不压缩。
+  - `Summarizer` 接口（`Summarize(ctx, SummarizeRequest) (string, error)`）产出纯文本摘要；仓库内只提供测试用 Fake。后续接入生产 LLM 适配器时，其调用需要计入 `RunPolicy`；当前尚未交付这条路径。
+- 压缩语义：`TokenBudget` 为唯一触发阈值——完整视图估算未超预算时保持原样（`Compacted=false`、`DroppedMessages=0`、`Summary=""`）；超预算时按原子单元（assistant 消息携带的 ToolCalls 与其全部 ToolResults 同属一个单元）整体压缩保留尾部之前的最老历史，保留不少于 `KeepRecent` 条的近期消息。`KeepRecent` 是硬下限，不通过继续删减保留消息凑预算；单次 `Build` 只调用一次 `Summarizer`，压缩后仍超预算即 `invalid_argument`。System Prompt 始终保留；已有摘要通过 `PreviousSummary` 参与新摘要生成。
 - 跨轮次持久化（供 Session Manager 使用）：`Result.Summary` 是新摘要的权威文本；被覆盖消息恰为 `req.Messages` 的前 `DroppedMessages` 条；`Compacted=true` 时调用方以 `Summary` 全量替换旧摘要并删除前 `DroppedMessages` 条消息，`Compacted=false` 时保留旧摘要不变。`contextmgr` 不读写 Session Store。
 - 失败语义：预算不可满足（含 System Prompt、`KeepRecent` 目标、摘要本身）→ `invalid_argument`；`Summarizer` 失败或空/全空白摘要 → `internal`（保留 Cause）；输入消息结构/配对非法 → 原样返回 `core` 错误；`ctx` 取消/超时 → `cancelled` / `deadline_exceeded`。错误路径返回零值 `Result`，不返回部分视图，调用方不得据此修改持久化状态。
 - 输出视图仍必须是合法的配对序列（`core.ValidateMessages`），不得因压缩产生孤儿 Result。
@@ -239,7 +238,7 @@ RUNNING ──► COMPLETED        （模型不再要求工具调用）
 | INV-B08 | 依赖方向：`builtin` 只 import 标准库 + `core` / `tool` / `session`；`core/**`、`tool/tool.go`、`session/session.go` 未变 | `go list` + `git diff` |
 | INV-B09 | Schema 子集：五个 `Parameters` 只用 `type` / `properties` / `description` / `enum` / `required` | 机械遍历 schema 键集合 |
 
-### 11.1 会话管理不变量（`session` 内存实现）
+### 11.2 会话管理不变量（`session` 内存实现）
 
 来源：`agent-session-manager-v1` 的 APPROVED `contract.md`（该 Contract 内编号 INV-001—INV-008 依次对应下表 INV-009—INV-016；Contract INV-009「分层与模型稳定」由本表 INV-001 与 §3 职责共同覆盖）。
 
@@ -257,7 +256,7 @@ RUNNING ──► COMPLETED        （模型不再要求工具调用）
 
 INV-017 来源：`session-turn-drop-leading-v1` 的 APPROVED `contract.md`（该 Contract 内 INV-001—INV-006 由本条覆盖）。
 
-### 11.1 Agent Loop 不变量（`agent-runtime-loop-v1`，任务局部编号）
+### 11.3 Agent Loop 不变量（`agent-runtime-loop-v1`，任务局部编号）
 
 不占用全局 `INV-0xx` 号段；来源为该任务 APPROVED `contract.md`。
 
@@ -274,12 +273,15 @@ INV-017 来源：`session-turn-drop-leading-v1` 的 APPROVED `contract.md`（该
 
 ## 12. 文件所有权
 
-`go.mod` 与 `Makefile` 是**工程公共文件**，不属于任何业务模块，只由契约层任务或 Owner 授权变更。
+`go.mod` 与 `Makefile` 是工程公共文件，不属于任何业务模块，只由契约层任务或 Owner 授权变更。下表保留模块与测试文件的定位，便于维护时查阅。
+
+<details>
+<summary>展开文件职责与测试入口</summary>
 
 | 路径 | 归属 | 说明 |
 | --- | --- | --- |
 | `go.mod` | 工程公共 | module + go 版本，零 require |
-| `Makefile` | 工程公共 | `test` / `build` / `vet` / `test-engine` |
+| `Makefile` | 工程公共 | 业务检查 `ci`、本地构建 `build`、容器启动 `init` / `check` / `up`、独立校验器 `test-engine` |
 | `core/message.go` | core | Role / ContentType / ContentPart / Message / `Message.Validate` |
 | `core/toolcall.go` | core | ToolCall / ToolResult / ToolSpec / `ToolResult.Validate` |
 | `core/run.go` | core | ExecutionRef / RunStatus / IsTerminal / RunPolicy / RunResult 及校验 |
@@ -373,54 +375,32 @@ INV-017 来源：`session-turn-drop-leading-v1` 的 APPROVED `contract.md`（该
 - 禁止在模块目录外新增业务源码；禁止跨模块混放（如把 `tool` 接口写进 `core`）。
 - `e2e/` 是**仅测试包**（`package e2e_test`，只含 `*_test.go`），不属于 §2 的生产分层：`go list .Imports` 为空（模块内依赖落在 `.XTestImports`），`go build ./...` 跳过该目录；`go build ./e2e` 单包会报 `no non-test Go files`，属预期行为，不视为仓库构建失败。禁止在其中新增非测试文件、生产导出符号或把验收逻辑改写成生产代码。
 
+</details>
+
 ## 13. 工程入口
 
-- `make test` → 根模块 `go test ./...`，与 `.cnb.yml` 的 `pr-check` 入口一致。
-- `make build` → `go build ./...`；`make vet` → `go vet ./...`。
-- `make test-engine` → `GOWORK=off go -C .agent/engine test ./...`：`.agent/engine` 是独立 Module，根模块 `./...` 不会包含它（点目录 + 嵌套 Module 都被剪枝），因此必须单独运行。
-- 不使用 `go.work` / `replace` 关联 Engine 与业务 Module。
+- `make build`：构建 `cmd/mini-agent`，输出 `bin/mini-agent`。
+- `make test`：`go test -count=1 ./...`；`make vet`：`go vet ./...`。
+- `make ci`：构建、静态检查、测试与竞态检查；当前 `.cnb.yml` 使用此入口。
+- `make init` / `make check` / `make up`：配置准备、预检查和 Docker Compose 启动，详见[运行指南](../running.md)。
+- `make test-engine`：独立测试 `.agent/engine`；根业务模块的 `./...` 不包含该嵌套 Module。不使用 `go.work` 或 `replace` 关联两者。
 
-## 14. 未验证事项与后续任务边界
+## 14. 当前边界与验证状态
 
-未验证：
-
-- `cnb.cool/framework-station/mini-agent-go` 的外部 `go get` 可用性。
-- INV-006 / INV-007 / INV-008 的运行期行为（T00 只有签名、映射函数与契约级测试）；INV-005 现由 §8.1 的能力注入约束与 `session` 测试补充证据。运行期证据由 `agent`（T07，已交付并合并入 `develop`）补齐。
-- INV-009—INV-013 只有 `tool` 包单元测试证据，尚未在 `agent` 的 Run 中集成验证（集成与终态映射见 §7「提交边界」，已在 T07 交付）。
-- INV-B05 / INV-B06 的真实会话隔离、跨会话不可写、Todo 生命周期与持久化并发：`builtin` 只有测试专用 Fake 证据，运行期证据归服务装配任务（T08）。
-- Todo 端到端行为（模型发起 `todo_*` 调用到真实 Todo 落库）：需要服务装配任务（T08）把 `session.TodoOperations` 适配成 `builtin.TodoOperations` 后才可验证。
-- `HeuristicEstimator` 与真实模型 token 数的偏差幅度未验证（按 4 字符/token 估算，对 CJK 偏低）；`TokenBudget` 已固定为估算预算，精确校准依赖真实 tokenizer 评估（服务装配任务 T08）。
-- 日志记录在真实 Agent Loop 中产生是否完整、调用方是否真正隔离日志错误，尚未验证；本仓库目前只有 Sink 层的进程内证据。
-- `-race` 与 `go test -race` 未进入 CI（`.cnb.yml` 只有 `make test`），会话并发不变量依赖本地/审查时人工执行。
-- `session` 内存实现无持久化，进程重启数据丢失是既定行为，不做恢复验证。
-- HTTP 服务的运行期行为（端点契约、认证与监听边界、错误码映射、取消/超时穿透、优雅关闭）在 T09 交付后由 `httpapi` / `service` / `cmd` 测试与 Cleaner 核对证明；客户端断开时响应不可达，无法验证客户端实际收到的状态码。
-- v1 服务禁用上下文压缩（`TokenBudget=0`）且不注册 Todo 工具：长会话触达 Provider 限制时以 `provider_failure` 结束，属既定边界而非缺陷。
-- 端到端验收的边界（`agent-runtime-e2e-tests-v1`，Owner 批准 D1–D4）：HTTP 层触发 `todo_*` 与上下文压缩在 v1 装配下不可达（`service.Config` 拒绝 `TokenBudget != 0`，v1 registry 不注册 Todo 工具），因此该任务只以 Session 预置数据的快照对比证明跨会话隔离与失败不回滚，**不做 Todo 端到端宣称**；Todo 端到端行为、`session.TodoOperations` → `builtin.TodoOperations` 适配与生产 `Summarizer` 仍归服务装配任务（T08）。同时确认：`e2e/` 装配的 registry 为 `calculator` + `mock_search`，与 `cmd/mini-agent` 的 v1 生产 registry（仅 `calculator`）不同，证据只覆盖 Runtime 能力而非生产注册集合等价；该任务的失败三元组矩阵记录在任务 Contract 与交付记录中，本节不重复，也不因此修改 §7。
-
-归属后续任务：
-
-| 内容 | 归属 |
+| 内容 | 当前实现与证据 |
 | --- | --- |
-| 取消/超时在 Loop 中的实际中断点与消息保留策略 | `agent`（T07，已交付；设计见 §7「提交边界」） |
-| 跨 step 的 `RunStatus` 终态映射、是否继续/重试决策、同 step 多调用顺序与并发 | `agent`（T07，已交付；同 step 多调用按数组序串行） |
-| 真实运行期事件完整性、日志旁路在 Agent Loop 中成立（发出点接线与调用方隔离日志错误） | `agent`（T07，已交付；发出点见 §10） |
-| HTTP 对外协议与可启动入口：三个端点、错误码封闭枚举与状态码映射、Bearer 认证与默认回环监听、请求超时与优雅关闭 | `agent-http-api-v1`（T09，Contract APPROVED，A1 = `46d871d`；契约见 `docs/design/http-api.md`） |
-| HTTP ↔ Agent 装配：同 Turn 适配器、per-Run `Loop`、Provider 接线与 `calculator` 注册 | `agent-http-api-v1`（T09，同上） |
-| `Turn` 前缀删除能力（压缩移除，事务内与追加、摘要同批提交或回滚） | 已完成（`session-turn-drop-leading-v1`，见 §8.1 / INV-017），不再是 `agent` 的前置依赖 |
-| `session.Store` 的持久化实现（DB / Redis）、重启恢复与数据迁移 | Session 持久化任务 |
-| `builtin.TodoOperations` 的适配实现、Todo ID 生成、状态迁移、`ErrTodoNotFound` 映射 | 服务装配任务（T08，编号待 TaskBuilder 确认） |
-| `session.TodoOperations` 与 `builtin.TodoOperations` 两套端口的集成、真实会话隔离与 Todo 端到端验收 | 服务装配任务（T08）+ 集成验收 |
-| token 预算、窗口截断、压缩算法 | 已完成（T05，见 §9） |
-| 生产 LLM `Summarizer` 适配器（调用计入 `RunPolicy`）、真实 tokenizer 与估算校准 | 服务装配任务（T08） |
-| Provider 重试、限流、streaming、鉴权 | Provider 任务 |
+| 循环、预算与日志 | `agent` 单元测试及 HTTP 集成测试覆盖；真实计算器调用留有响应和 Trace 摘录 |
+| 会话并发与提交 | `session` / `service` / `e2e` 覆盖串行、隔离、取消及失败不提交；当前无跨实例保证 |
+| 内置工具 | 五个工具有模块测试；默认服务只注册计算器，E2E 额外注册模拟搜索 |
+| Todo 服务接入 | 尚无 `session.TodoOperations` 到 `builtin.TodoOperations` 的生产适配；未验证模型驱动的 Todo 端到端操作 |
+| 压缩 | `contextmgr` 和 `agent` 使用 Fake Summarizer 验证预算、配对和摘要提交；默认 HTTP 服务固定 `TokenBudget=0`，生产摘要器未接入 |
+| Token 估算 | 每条消息固定开销加 4 字符/token 的启发式估算；未对真实模型校准，也未覆盖工具 Schema 与输出预留 |
+| 存储 | 内存 Session，退出丢失；默认 TTL 为 0，无自动过期清理 |
+| 模型访问 | OpenAI 兼容 Chat Completions，已有 TokenHub 验收记录；无自动重试或流式输出，不保证兼容所有服务商扩展 |
+| HTTP | 端点、认证、错误映射、取消与关闭有测试；客户端断连时无法保证错误响应送达 |
+| 发布 | `.cnb.yml` 配置检查与应用镜像发布；平台运行成功需要对应构建记录，源码配置不自证发布完成 |
 
-归属收窄（2026-10-20，`tool-registry-executor-v1`）：单工具级失败分类（工具级超时、工具 `error`、参数校验失败、未知工具、panic）、参数校验、Registry 生命周期与同一 Run 内重复 Call ID 去重已落入 §7 / §11，不再属于 Agent Loop 任务；Agent Loop 只承担跨 step 的 `RunStatus` 终态映射、是否继续/重试决策与同 step 多调用顺序并发。
-
-归属收窄（2026-10-20，`runtime-observability-v1`）：Sink 层旁路（写入失败、Handler 异常、`ctx` 取消、异常载荷）与记录完整性（单行 JSON、并发不交织、字段语义与脱敏）已落入 §10，不再属于 Agent Loop 任务；Agent Loop 仅承担发出点接线、事件完整性以及调用方隔离日志错误。
-
-归属裁定（2026-10-20，`agent-runtime-loop-v1`，Owner 批准）：L3 交付 `agent` 包，承担 Run 内循环、双预算、`finish_reason` 终态判定、提交边界与事件接线（§3 / §7 / §10 / §11.1）。三处范围明确排除，避免无人负责或重复归属：① 压缩后「删除已提交历史前缀」的 `Turn` 写能力已由 `session-turn-drop-leading-v1` 交付（§8.1 / INV-017），`agent` 只调用，不得自行扩展 `session` 公共接口或重入 `Save`；② 生产 Todo 适配（含 ID 生成与状态迁移）与生产 LLM `Summarizer`（含真实 tokenizer 校准）归服务装配任务 T08，编号与范围由 TaskBuilder 正式确认；③ 并行工具执行、Provider 重试/限流与 CLI / HTTP 入口不在 L3 当前范围内。
-
-归属裁定（2026-10-20，`agent-http-api-v1`，Owner 批准）：L3 新增 `httpapi` / `service` / `cmd/mini-agent`，承担 HTTP 对外协议（端点、字段、错误码域、认证与默认回环监听、请求超时与优雅关闭）、HTTP ↔ Agent 的同 Turn 装配（一次真实 `RunTurn`，用户消息与产出同事务提交或整轮回滚）以及可启动入口（环境变量装配、Provider 接线、`calculator` 注册）；对外契约单独沉淀在 `docs/design/http-api.md`。三处边界固定：① `agent` 公共 API 不因 HTTP 入口变更，`service` 只作为 `SessionRunner` 的注入实现方；② Todo 端口适配（含 ID 生成与状态迁移）与生产 LLM `Summarizer`（含真实 tokenizer 校准）仍归 T08，v1 服务只注册 `calculator`、`TokenBudget=0`（不压缩）、`Summarizer` 为 fail-closed 占位；③ 流式输出、异步轮询、TLS / CORS / 限流 / metrics、会话持久化、用户体系与 RBAC 不在 T09 范围。
+详见[验证说明](../verification.md)。这里记录当前能力；历史任务里的“未验证”或后续任务编号反映当时阶段，不替代当前代码和测试。
 
 ## 15. 演进规则
 
