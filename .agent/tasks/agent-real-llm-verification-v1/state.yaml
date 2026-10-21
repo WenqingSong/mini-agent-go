@@ -12,7 +12,8 @@ review:
   target: "aad9dd4518c90445b32812f5f7174612790598a0"
 
 owner:
-  status: PENDING
+  status: ACCEPTED
+  review_target: "aad9dd4518c90445b32812f5f7174612790598a0"
 
 delivery:
   status: NOT_RUN
