@@ -1,8 +1,11 @@
 // Command mini-agent 是 Agent Runtime 的可启动 HTTP 入口。
 //
-// 它只负责装配：环境变量 → 配置（fail-closed 校验）→ Provider / 工具注册表 /
+// 它只负责装配：环境变量 → 配置（fail-closed 校验）→ Provider / 工具注册表构造器 /
 // 内存 Session Manager / 上下文管理器 / 日志 Sink → 监听 → 终止信号 → 优雅关闭。
 // 业务逻辑与协议定义分别在 service 与 httpapi 中，本命令不承载任何业务规则。
+//
+// 工具清单本身由 service.NewToolset 决定（calculator / mock_search / todo_*），
+// 这里只把构造器交给装配层，避免入口与运行时各自维护一份工具列表。
 //
 // 配置只从环境变量读取（不进入命令行参数）；凭证不硬编码、不打印、不写入错误信息。
 package main
@@ -19,13 +22,11 @@ import (
 	"syscall"
 	"time"
 
-	"cnb.cool/framework-station/mini-agent-go/builtin"
 	"cnb.cool/framework-station/mini-agent-go/httpapi"
 	"cnb.cool/framework-station/mini-agent-go/llm/openai"
 	"cnb.cool/framework-station/mini-agent-go/runlog"
 	"cnb.cool/framework-station/mini-agent-go/service"
 	"cnb.cool/framework-station/mini-agent-go/session"
-	"cnb.cool/framework-station/mini-agent-go/tool"
 )
 
 // 环境变量名：与 docs/design/http-api.md §8 的配置契约一致。
@@ -92,15 +93,12 @@ func run(ctx context.Context, opts options) error {
 	if err != nil {
 		return fmt.Errorf("mini-agent: 构造 LLM Provider 失败: %w", err)
 	}
-	registry, err := newRegistry()
-	if err != nil {
-		return err
-	}
 	sessions := session.NewManager(session.ManagerConfig{})
 	runner, err := service.NewRunner(service.Deps{
 		Provider: provider,
 		Sessions: sessions,
-		Registry: registry,
+		// 工具注册表按 Run 构造：Todo 工具必须绑定本次 Run 的 Session Turn。
+		Tools: service.NewToolset,
 		// 运行事件只经 runlog.Sink 记录；Sink 失败不影响响应与 Run 结论。
 		Sink: runlog.NewJSONSink(logWriter),
 	}, serviceConfig)
@@ -165,20 +163,6 @@ func run(ctx context.Context, opts options) error {
 		shutdownErr = serveErr
 	}
 	return shutdownErr
-}
-
-// newRegistry 构造 v1 的工具注册表：只注册 calculator 并封闭注册表。
-//
-// Todo 工具需要逐 Turn 的 TodoOperations，其端口适配属于服务装配任务 T08，不在 v1。
-func newRegistry() (tool.Registry, error) {
-	registry := tool.NewMapRegistry()
-	if err := registry.Register(builtin.NewCalculator()); err != nil {
-		return nil, fmt.Errorf("mini-agent: 注册 calculator 失败: %w", err)
-	}
-	if err := registry.Seal(); err != nil {
-		return nil, fmt.Errorf("mini-agent: 封闭工具注册表失败: %w", err)
-	}
-	return registry, nil
 }
 
 // waitReady 等待监听就绪并返回实际地址；服务提前退出、ctx 结束或超时都返回错误。

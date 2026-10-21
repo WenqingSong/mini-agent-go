@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -398,6 +399,261 @@ func TestRunRepeatedTerminationSignals(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("重复终止信号下进程未退出")
 	}
+}
+
+// wireTool 是 Chat Completions 请求中 tools[] 的一项。
+type wireTool struct {
+	Type     string `json:"type"`
+	Function struct {
+		Name        string          `json:"name"`
+		Description string          `json:"description"`
+		Parameters  json.RawMessage `json:"parameters"`
+	} `json:"function"`
+}
+
+// wireMessage 是请求中需要断言的消息字段。
+type wireMessage struct {
+	Role       string `json:"role"`
+	Content    string `json:"content"`
+	ToolCallID string `json:"tool_call_id"`
+}
+
+// wireChatRequest 是从假 Provider 收到并解析的请求体。
+type wireChatRequest struct {
+	Messages []wireMessage `json:"messages"`
+	Tools    []wireTool    `json:"tools"`
+}
+
+// lastToolMessage 返回请求中最后一条 tool 消息。
+func (r wireChatRequest) lastToolMessage() (wireMessage, bool) {
+	for index := len(r.Messages) - 1; index >= 0; index-- {
+		if r.Messages[index].Role == "tool" {
+			return r.Messages[index], true
+		}
+	}
+	return wireMessage{}, false
+}
+
+// toolCallsBody 构造一次 finish_reason=tool_calls 的响应体。
+func toolCallsBody(callID, name, arguments string) string {
+	payload := map[string]any{
+		"id": "chatcmpl-tool",
+		"choices": []map[string]any{{
+			"message": map[string]any{
+				"role":    "assistant",
+				"content": "",
+				"tool_calls": []map[string]any{{
+					"id":   callID,
+					"type": "function",
+					"function": map[string]any{
+						"name":      name,
+						"arguments": arguments,
+					},
+				}},
+			},
+			"finish_reason": "tool_calls",
+		}},
+		"usage": map[string]any{"prompt_tokens": 3, "completion_tokens": 2},
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		panic(fmt.Sprintf("测试脚本序列化失败：%v", err))
+	}
+	return string(encoded)
+}
+
+// scriptedOpenAI 是按序返回预设响应体的假 Provider，并保留每次收到的原始请求体。
+func scriptedOpenAI(t *testing.T, bodies []string) (*httptest.Server, func() [][]byte) {
+	t.Helper()
+	var mu sync.Mutex
+	var requests [][]byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		payload, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		index := len(requests)
+		requests = append(requests, payload)
+		mu.Unlock()
+
+		if r.URL.Path != "/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		if index >= len(bodies) {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, bodies[index])
+	}))
+	t.Cleanup(server.Close)
+	return server, func() [][]byte {
+		mu.Lock()
+		defer mu.Unlock()
+		out := make([][]byte, len(requests))
+		copy(out, requests)
+		return out
+	}
+}
+
+// TestRunRegistersProductionToolset 是本任务的核心装配证据：直接启动正式 run()，
+// 通过 HTTP 触发 chat，证明模型收到五类工具定义、Todo 工具真实执行并按 CallID 回填，
+// 且同一会话的后续请求能看到上一轮已提交的待办。
+func TestRunRegistersProductionToolset(t *testing.T) {
+	const (
+		createCall = "call-todo-create"
+		listCall   = "call-todo-list"
+		title      = "准备周会材料"
+	)
+	llmServer, recorded := scriptedOpenAI(t, []string{
+		toolCallsBody(createCall, "todo_create", `{"title":"`+title+`"}`),
+		replyBodyFor("chatcmpl-text-1", "待办已创建"),
+		toolCallsBody(listCall, "todo_list", `{}`),
+		replyBodyFor("chatcmpl-text-2", "当前有 1 条待办"),
+	})
+	logs := &syncBuffer{}
+
+	baseURL, signals, results, _ := startRun(t, map[string]string{
+		"MINI_AGENT_LISTEN_ADDR":  "127.0.0.1:0",
+		"MINI_AGENT_AUTH_TOKEN":   fakeAuthToken,
+		"MINI_AGENT_LLM_BASE_URL": llmServer.URL,
+		"MINI_AGENT_MODEL":        "test-model",
+	}, logs)
+
+	status, body, _ := httpJSON(t, http.MethodPost, baseURL+"/v1/sessions", "", fakeAuthToken)
+	if status != http.StatusCreated {
+		t.Fatalf("创建会话 = (%d,%s)，期望 201", status, body)
+	}
+	var created struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.Unmarshal(body, &created); err != nil {
+		t.Fatalf("创建会话响应不是合法 JSON：%v", err)
+	}
+
+	first := httpJSONStatus(t, baseURL, created.SessionID, "帮我记一条待办")
+	if first.Status != http.StatusOK || first.Reply != "待办已创建" || first.ToolCalls != 1 {
+		t.Fatalf("第一轮 = %+v，期望 COMPLETED 且执行 1 次工具", first)
+	}
+	second := httpJSONStatus(t, baseURL, created.SessionID, "现在有哪些待办")
+	if second.Status != http.StatusOK || second.Reply != "当前有 1 条待办" || second.ToolCalls != 1 {
+		t.Fatalf("第二轮 = %+v，期望 COMPLETED 且执行 1 次工具", second)
+	}
+
+	requests := recorded()
+	if len(requests) != 4 {
+		t.Fatalf("模型请求次数 = %d，期望 4（两轮各 2 次）", len(requests))
+	}
+
+	// 工具清单：五类工具都在 tools[] 中，且名称/描述/参数 Schema 完整。
+	wantNames := []string{"calculator", "mock_search", "todo_complete", "todo_create", "todo_list"}
+	for _, index := range []int{0, 2} {
+		var request wireChatRequest
+		if err := json.Unmarshal(requests[index], &request); err != nil {
+			t.Fatalf("第 %d 次模型请求不是合法 JSON：%v", index+1, err)
+		}
+		names := make([]string, 0, len(request.Tools))
+		for _, item := range request.Tools {
+			names = append(names, item.Function.Name)
+			if item.Type != "function" || item.Function.Description == "" {
+				t.Fatalf("工具 %q 定义不完整：%+v", item.Function.Name, item)
+			}
+			var schema map[string]any
+			if err := json.Unmarshal(item.Function.Parameters, &schema); err != nil {
+				t.Fatalf("工具 %q 的 parameters 不是合法 JSON：%v", item.Function.Name, err)
+			}
+			if schema["type"] != "object" {
+				t.Fatalf("工具 %q 的 parameters 根类型 = %v，期望 object", item.Function.Name, schema["type"])
+			}
+		}
+		if !reflect.DeepEqual(names, wantNames) {
+			t.Fatalf("第 %d 次请求 tools[] = %v，期望 %v", index+1, names, wantNames)
+		}
+	}
+
+	// 第 2 次请求：模型看到了 todo_create 的真实结果（CallID 回填 + 待办内容）。
+	var afterCreate wireChatRequest
+	if err := json.Unmarshal(requests[1], &afterCreate); err != nil {
+		t.Fatalf("第 2 次模型请求不是合法 JSON：%v", err)
+	}
+	createdResult, ok := afterCreate.lastToolMessage()
+	if !ok || createdResult.ToolCallID != createCall {
+		t.Fatalf("第 2 次请求缺少 CallID=%q 的工具结果：%+v", createCall, afterCreate.Messages)
+	}
+	if !strings.Contains(createdResult.Content, title) || !strings.Contains(createdResult.Content, `"status":"pending"`) {
+		t.Fatalf("todo_create 结果 = %q，期望包含 %q 与 pending 状态", createdResult.Content, title)
+	}
+
+	// 第 4 次请求：Todo 已跨 Run 持久在会话中，todo_list 能看到上一轮创建的待办。
+	var afterList wireChatRequest
+	if err := json.Unmarshal(requests[3], &afterList); err != nil {
+		t.Fatalf("第 4 次模型请求不是合法 JSON：%v", err)
+	}
+	listedResult, ok := afterList.lastToolMessage()
+	if !ok || listedResult.ToolCallID != listCall {
+		t.Fatalf("第 4 次请求缺少 CallID=%q 的工具结果：%+v", listCall, afterList.Messages)
+	}
+	if !strings.Contains(listedResult.Content, title) || !strings.Contains(listedResult.Content, `"todos"`) {
+		t.Fatalf("todo_list 结果 = %q，期望包含上一轮创建的待办 %q", listedResult.Content, title)
+	}
+
+	signals <- os.Interrupt
+	select {
+	case err := <-results:
+		if err != nil {
+			t.Fatalf("优雅关闭返回错误：%v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("收到终止信号后未在限定时间内退出")
+	}
+	scanForSecrets(t, "运行日志", logs.String())
+}
+
+// replyBodyFor 构造一次 stop 终稿响应体。
+func replyBodyFor(id, text string) string {
+	payload := map[string]any{
+		"id": id,
+		"choices": []map[string]any{{
+			"message":       map[string]any{"role": "assistant", "content": text},
+			"finish_reason": "stop",
+		}},
+		"usage": map[string]any{"prompt_tokens": 3, "completion_tokens": 2},
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		panic(fmt.Sprintf("测试脚本序列化失败：%v", err))
+	}
+	return string(encoded)
+}
+
+// chatOutcome 是一次 chat 请求的关键结论。
+type chatOutcome struct {
+	Status    int
+	Reply     string
+	ToolCalls int
+	LLMCalls  int
+}
+
+// httpJSONStatus 发送一次 chat 请求并解析结论；非 200 也返回状态码，便于失败时定位。
+func httpJSONStatus(t *testing.T, baseURL, sessionID, message string) chatOutcome {
+	t.Helper()
+	body := fmt.Sprintf(`{"session_id":%q,"message":%q}`, sessionID, message)
+	status, payload, _ := httpJSON(t, http.MethodPost, baseURL+"/v1/chat", body, fakeAuthToken)
+	outcome := chatOutcome{Status: status}
+	if status != http.StatusOK {
+		return outcome
+	}
+	var parsed struct {
+		Reply     string `json:"reply"`
+		ToolCalls int    `json:"tool_calls"`
+		LLMCalls  int    `json:"llm_calls"`
+	}
+	if err := json.Unmarshal(payload, &parsed); err != nil {
+		t.Fatalf("chat 响应不是合法 JSON：%v（%s）", err, payload)
+	}
+	outcome.Reply = parsed.Reply
+	outcome.ToolCalls = parsed.ToolCalls
+	outcome.LLMCalls = parsed.LLMCalls
+	return outcome
 }
 
 // scanForSecrets 断言文本中不出现测试注入的假凭证。

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"cnb.cool/framework-station/mini-agent-go/builtin"
 	"cnb.cool/framework-station/mini-agent-go/contextmgr"
 	"cnb.cool/framework-station/mini-agent-go/core"
 	"cnb.cool/framework-station/mini-agent-go/httpapi"
@@ -246,6 +247,13 @@ func newRegistry(t *testing.T, item tool.Tool) *tool.MapRegistry {
 	return registry
 }
 
+// fixedTools 让用例注入固定工具集合：忽略 Todo 端口，等价于「本轮工具全部无会话状态」。
+func fixedTools(registry tool.Registry) ToolsetFactory {
+	return func(builtin.TodoOperations) (tool.Registry, error) {
+		return registry, nil
+	}
+}
+
 // newTestRunner 构造装配层 Runner。
 func newTestRunner(t *testing.T, deps Deps, cfg Config) *Runner {
 	t.Helper()
@@ -270,7 +278,7 @@ func TestRunUsesExactlyOneRealRunTurn(t *testing.T) {
 	seedSession(t, manager, "s-1")
 	sessions := &countingSessions{manager: manager}
 
-	runner := newTestRunner(t, Deps{Provider: provider, Sessions: sessions, Registry: newRegistry(t, calculator)}, Config{})
+	runner := newTestRunner(t, Deps{Provider: provider, Sessions: sessions, Tools: fixedTools(newRegistry(t, calculator))}, Config{})
 
 	outcome, err := runner.Run(context.Background(), httpapi.RunRequest{SessionID: "s-1", RunID: "run-1", Message: "1+2 等于多少"})
 	if err != nil {
@@ -319,7 +327,7 @@ func TestRunSecondTurnSeesPreviousHistory(t *testing.T) {
 	}}
 	manager := newManager()
 	seedSession(t, manager, "s-1")
-	runner := newTestRunner(t, Deps{Provider: provider, Sessions: manager, Registry: newRegistry(t, &recordingTool{name: "calculator"})}, Config{})
+	runner := newTestRunner(t, Deps{Provider: provider, Sessions: manager, Tools: fixedTools(newRegistry(t, &recordingTool{name: "calculator"}))}, Config{})
 
 	if _, err := runner.Run(context.Background(), httpapi.RunRequest{SessionID: "s-1", RunID: "run-1", Message: "第一轮问题"}); err != nil {
 		t.Fatalf("第一轮失败：%v", err)
@@ -371,7 +379,7 @@ func TestRunUnknownSessionDoesNotInvokeRun(t *testing.T) {
 	provider := &scriptedProvider{script: []llm.Response{textResponse("resp-1", "不应出现")}}
 	manager := newManager()
 	sessions := &countingSessions{manager: manager}
-	runner := newTestRunner(t, Deps{Provider: provider, Sessions: sessions, Registry: newRegistry(t, &recordingTool{name: "calculator"})}, Config{})
+	runner := newTestRunner(t, Deps{Provider: provider, Sessions: sessions, Tools: fixedTools(newRegistry(t, &recordingTool{name: "calculator"}))}, Config{})
 
 	_, err := runner.Run(context.Background(), httpapi.RunRequest{SessionID: "missing", RunID: "run-1", Message: "hi"})
 	if !errors.Is(err, session.ErrSessionNotFound) {
@@ -398,7 +406,7 @@ func TestRunProviderFailureLeavesNoPartialHistory(t *testing.T) {
 	provider := &scriptedProvider{onCall: func(context.Context, int) (llm.Response, error) {
 		return llm.Response{}, errors.New("上游不可用")
 	}}
-	runner := newTestRunner(t, Deps{Provider: provider, Sessions: manager, Registry: newRegistry(t, &recordingTool{name: "calculator"})}, Config{})
+	runner := newTestRunner(t, Deps{Provider: provider, Sessions: manager, Tools: fixedTools(newRegistry(t, &recordingTool{name: "calculator"}))}, Config{})
 
 	outcome, err := runner.Run(context.Background(), httpapi.RunRequest{SessionID: "s-1", RunID: "run-1", Message: "这一轮应被丢弃"})
 	if err != nil {
@@ -434,7 +442,7 @@ func TestRunClientCancelLeavesNoPartialHistory(t *testing.T) {
 		observed <- ctx.Err()
 		return llm.Response{}, ctx.Err()
 	}}
-	runner := newTestRunner(t, Deps{Provider: provider, Sessions: manager, Registry: newRegistry(t, &recordingTool{name: "calculator"})}, Config{})
+	runner := newTestRunner(t, Deps{Provider: provider, Sessions: manager, Tools: fixedTools(newRegistry(t, &recordingTool{name: "calculator"}))}, Config{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -477,7 +485,7 @@ func TestRunDeadlineIsDistinguishableFromCancel(t *testing.T) {
 		<-ctx.Done()
 		return llm.Response{}, ctx.Err()
 	}}
-	runner := newTestRunner(t, Deps{Provider: provider, Sessions: manager, Registry: newRegistry(t, &recordingTool{name: "calculator"})}, Config{})
+	runner := newTestRunner(t, Deps{Provider: provider, Sessions: manager, Tools: fixedTools(newRegistry(t, &recordingTool{name: "calculator"}))}, Config{})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
@@ -505,7 +513,7 @@ func TestRunCompletedButCommitRejectedIsNotSuccess(t *testing.T) {
 	runner := newTestRunner(t, Deps{
 		Provider: provider,
 		Sessions: commitRejectingSessions{manager: manager},
-		Registry: newRegistry(t, &recordingTool{name: "calculator"}),
+		Tools:    fixedTools(newRegistry(t, &recordingTool{name: "calculator"})),
 	}, Config{})
 
 	outcome, err := runner.Run(context.Background(), httpapi.RunRequest{SessionID: "s-1", RunID: "run-1", Message: "hi"})
@@ -530,7 +538,7 @@ func TestRunSameSessionConcurrentChatsSerialize(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 		return textResponse("resp", "回答"), nil
 	}}
-	runner := newTestRunner(t, Deps{Provider: provider, Sessions: sessions, Registry: newRegistry(t, &recordingTool{name: "calculator"})}, Config{})
+	runner := newTestRunner(t, Deps{Provider: provider, Sessions: sessions, Tools: fixedTools(newRegistry(t, &recordingTool{name: "calculator"}))}, Config{})
 
 	var waitGroup sync.WaitGroup
 	results := make([]error, 2)
@@ -598,7 +606,7 @@ func TestRunNeverCallsSummarizer(t *testing.T) {
 	runner := newTestRunner(t, Deps{
 		Provider:   provider,
 		Sessions:   manager,
-		Registry:   newRegistry(t, &recordingTool{name: "calculator"}),
+		Tools:      fixedTools(newRegistry(t, &recordingTool{name: "calculator"})),
 		Summarizer: summarizer,
 	}, Config{KeepRecent: 0})
 
@@ -622,7 +630,7 @@ func TestNewRunnerFailClosed(t *testing.T) {
 		return Deps{
 			Provider: &scriptedProvider{},
 			Sessions: newManager(),
-			Registry: newRegistry(t, &recordingTool{name: "calculator"}),
+			Tools:    fixedTools(newRegistry(t, &recordingTool{name: "calculator"})),
 		}
 	}
 
@@ -636,9 +644,9 @@ func TestNewRunnerFailClosed(t *testing.T) {
 		{name: "MaxLLMCalls 为负", deps: validDeps(), cfg: Config{Model: "m", MaxLLMCalls: -1}},
 		{name: "MaxToolCalls 为负", deps: validDeps(), cfg: Config{Model: "m", MaxToolCalls: -1}},
 		{name: "KeepRecent 为负", deps: validDeps(), cfg: Config{Model: "m", KeepRecent: -1}},
-		{name: "缺少 Provider", deps: Deps{Sessions: newManager(), Registry: tool.NewMapRegistry()}, cfg: Config{Model: "m"}},
-		{name: "缺少 Sessions", deps: Deps{Provider: &scriptedProvider{}, Registry: tool.NewMapRegistry()}, cfg: Config{Model: "m"}},
-		{name: "缺少 Registry", deps: Deps{Provider: &scriptedProvider{}, Sessions: newManager()}, cfg: Config{Model: "m"}},
+		{name: "缺少 Provider", deps: Deps{Sessions: newManager(), Tools: fixedTools(tool.NewMapRegistry())}, cfg: Config{Model: "m"}},
+		{name: "缺少 Sessions", deps: Deps{Provider: &scriptedProvider{}, Tools: fixedTools(tool.NewMapRegistry())}, cfg: Config{Model: "m"}},
+		{name: "缺少 Tools", deps: Deps{Provider: &scriptedProvider{}, Sessions: newManager()}, cfg: Config{Model: "m"}},
 	}
 
 	for _, item := range cases {

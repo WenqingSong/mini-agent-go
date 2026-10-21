@@ -37,9 +37,9 @@ go test -count=1 ./httpapi -run 'TestProviderFailureClassificationEndToEnd|TestR
 
 ### 集成测试与默认启动入口的差异
 
-`e2e/harness_test.go` 使用真实 HTTP 层、Agent Loop、OpenAI 协议客户端和 Session Manager，模型端是本机 scripted server。测试注册 `calculator` 与 `mock_search`；默认 `cmd/mini-agent` 只注册 `calculator`。
+`e2e/harness_test.go` 使用真实 HTTP 层、Agent Loop、OpenAI 协议客户端和 Session Manager，模型端是本机 scripted server。测试与默认 `cmd/mini-agent` 使用同一个工具注册表构造器 `service.NewToolset`，因此两处的工具清单一致：`calculator`、`mock_search`、`todo_create`、`todo_list`、`todo_complete`。
 
-Todo 工具当前以测试专用端口验证。E2E 中的 Todo 与摘要是预置会话数据，用于验证状态隔离，不是通过模型调用 Todo 创建出来的。压缩使用注入的 Fake Summarizer 单独验证，默认 HTTP 服务不启用该路径。
+Todo 的端到端链路（创建、查询、完成、跨会话隔离、失败/预算/超时回滚）见 [e2e/todo_test.go](../e2e/todo_test.go)；Todo 状态由 `service/todo.go` 适配到当前 Session Turn，随整轮提交或回滚。压缩使用注入的 Fake Summarizer 单独验证，默认 HTTP 服务仍不启用该路径。
 
 ### README 运行路径复核
 

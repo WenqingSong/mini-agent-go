@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"cnb.cool/framework-station/mini-agent-go/builtin"
 	"cnb.cool/framework-station/mini-agent-go/core"
 	"cnb.cool/framework-station/mini-agent-go/httpapi"
 	"cnb.cool/framework-station/mini-agent-go/llm"
@@ -535,7 +536,7 @@ func TestRealRunnerEndToEnd(t *testing.T) {
 	runner, err := service.NewRunner(service.Deps{
 		Provider: provider,
 		Sessions: manager,
-		Registry: registry,
+		Tools:    func(builtin.TodoOperations) (tool.Registry, error) { return registry, nil },
 	}, service.Config{Model: "test-model"})
 	if err != nil {
 		t.Fatalf("构造 Runner 失败：%v", err)
