@@ -1,0 +1,24 @@
+# 本地编排：只有一个应用容器。Session 在进程内存中，不需要数据库/缓存/消息队列。
+# 配置全部来自 .env（env_file），镜像内不含任何凭据。
+services:
+  mini-agent:
+    build:
+      context: .
+    image: mini-agent-go:local
+
+    env_file:
+      - .env
+
+    environment:
+      # 容器内必须监听所有接口，否则宿主机无法通过端口映射访问；
+      # 对外暴露范围由下面的 ports 限制在宿主机回环地址，且应用强制要求 Bearer 凭证。
+      MINI_AGENT_LISTEN_ADDR: 0.0.0.0:8080
+
+    ports:
+      - "127.0.0.1:${MINI_AGENT_HOST_PORT:-8080}:8080"
+
+    # 应用的优雅关闭宽限期是 10s（MINI_AGENT_SHUTDOWN_GRACE），
+    # 留出余量，避免 docker stop 在应用完成在途请求前就 SIGKILL。
+    stop_grace_period: 15s
+
+    restart: unless-stopped

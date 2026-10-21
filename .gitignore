@@ -1,0 +1,12 @@
+# 本地配置与凭据：绝不入库（.env.example 只放占位符，必须提交）
+.env
+.env.local
+
+# 本地构建产物
+/bin/
+/mini-agent
+
+# 编辑器与系统文件
+.DS_Store
+.idea/
+.vscode/

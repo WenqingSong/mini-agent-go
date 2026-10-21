@@ -1,3 +1,12 @@
+# CNB 云原生构建配置（语法参考 https://docs.cnb.cool/zh/build/grammar.html）。
+#
+# 触发模型：
+#   * 任意分支 push / 任意目标分支的 PR → 只做检查（make ci），不发布任何制品；
+#   * 仅 main 的 push → 检查通过后才构建并推送镜像；检查失败即中止，latest 不会被更新。
+#
+# 镜像地址由 CNB 内置变量推导（CNB_DOCKER_REGISTRY + CNB_REPO_SLUG_LOWERCASE），
+# Fork 仓库自动推送到它自己的制品库，不会指向上游仓库。
+
 $:
   vscode:
     - name: goland-dev
@@ -15,26 +24,57 @@ $:
             git --version
             docker version
             docker compose version
-# 集成分支：main 保持原有流水线，develop 作为开发基线同样自动触发
+
+  pull_request:
+    - name: pr-check
+      docker:
+        image: golang:1.24
+        volumes:
+          - /go/pkg/mod
+          - /root/.cache/go-build
+      stages:
+        - name: check
+          script: make ci
+
+  push:
+    - name: branch-ci
+      docker:
+        image: golang:1.24
+        volumes:
+          - /go/pkg/mod
+          - /root/.cache/go-build
+      stages:
+        - name: check
+          script: make ci
+
+# main / develop 上的 PR：只检查，不发布（发布只由 main 的 push 触发）。
 "(main|develop)":
   pull_request:
     - name: pr-check
-      services:
-        - docker
       docker:
         image: golang:1.24
         volumes:
           - /go/pkg/mod
           - /root/.cache/go-build
       stages:
-        - name: test
-          script: make test
+        - name: check
+          script: make ci
 
+develop:
   push:
-    - name: main-ci-and-github-mirror
-      lock:
-        key: github-mirror-sync
-        wait: true
+    - name: develop-ci
+      docker:
+        image: golang:1.24
+        volumes:
+          - /go/pkg/mod
+          - /root/.cache/go-build
+      stages:
+        - name: check
+          script: make ci
+
+main:
+  push:
+    - name: release
       services:
         - docker
       docker:
@@ -42,37 +82,49 @@ $:
         volumes:
           - /go/pkg/mod
           - /root/.cache/go-build
-      imports:
-        - https://cnb.cool/framework-station/mini-agent-go-password/-/blob/main/github-mirror.yml
       stages:
-        - name: sync-all-branches-and-tags-to-github
+        # 同一流水线内先检查再发布：任一检查失败都会中止后面的镜像构建与推送。
+        - name: check
+          script: make ci
+        - name: build-and-push-image
           script: |
             set -euo pipefail
 
-            printf 'machine github.com\nlogin %s\npassword %s\n' \
-              "${GITHUB_USERNAME}" "${GITHUB_TOKEN}" > "${HOME}/.netrc"
-            chmod 600 "${HOME}/.netrc"
-            trap 'rm -f "${HOME}/.netrc"' EXIT
+            version="$(tr -d '[:space:]' < VERSION)"
+            if ! printf '%s' "${version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "✗ VERSION 内容必须是 X.Y.Z，当前为 '${version}'" >&2
+              exit 1
+            fi
+            if [ -z "${CNB_COMMIT_SHORT:-}" ] || [ -z "${CNB_REPO_SLUG_LOWERCASE:-}" ]; then
+              echo "✗ 缺少 CNB 内置变量 CNB_COMMIT_SHORT / CNB_REPO_SLUG_LOWERCASE" >&2
+              exit 1
+            fi
 
-            git fetch origin \
-              '+refs/heads/*:refs/remotes/cnb/*' \
-              '+refs/tags/*:refs/tags/*' \
-              --prune
+            image="${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}"
+            versioned="${image}:v${version}-${CNB_COMMIT_SHORT}"
+            echo "镜像：${versioned}（源码 ${CNB_COMMIT}）"
 
-            git remote remove github-mirror 2>/dev/null || true
-            git remote add github-mirror \
-              https://github.com/WenqingSong/mini-agent-go
+            printf '%s' "${CNB_TOKEN}" | docker login \
+              --username "${CNB_TOKEN_USER_NAME}" \
+              --password-stdin "${CNB_DOCKER_REGISTRY}"
 
-            for ref in $(git for-each-ref \
-              --format='%(refname)' refs/remotes/cnb); do
-              branch="${ref#refs/remotes/cnb/}"
-              if [ "${branch}" = "HEAD" ]; then
-                continue
-              fi
-              echo "Syncing branch: ${branch}"
-              git push github-mirror \
-                "${ref}:refs/heads/${branch}"
-            done
+            # 只构建一次；latest 由同一镜像 tag 派生，保证两个标签指向同一制品。
+            docker build --pull -t "${versioned}" .
 
-            echo "Syncing tags"
-            git push github-mirror --tags
+            # 兜底断言：镜像里不能出现本地 .env 或 Git 内部文件。
+            if docker run --rm --entrypoint /bin/sh "${versioned}" \
+              -c 'test ! -e /app/.env && test ! -e /app/.git'; then
+              echo "✓ 镜像不含 .env / .git"
+            else
+              echo "✗ 镜像包含 .env 或 .git，拒绝发布" >&2
+              exit 1
+            fi
+
+            docker tag "${versioned}" "${image}:latest"
+
+            # 先推不可变版本标签，成功后再移动 latest：
+            # 中途失败时 latest 仍指向最后一次成功发布。
+            docker push "${versioned}"
+            docker push "${image}:latest"
+            echo "✓ 已发布 ${versioned}"
+            echo "✓ 已更新 ${image}:latest"

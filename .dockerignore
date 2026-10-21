@@ -1,0 +1,17 @@
+# 构建上下文只保留编译 Go 代码必需的内容。
+.git
+.gitignore
+.agent
+bin
+
+# 本地配置与凭据：绝不进入镜像
+.env
+.env.*
+.env.example
+
+# 与运行无关的仓库文件
+Dockerfile
+.dockerignore
+compose.yaml
+*.md
+docs
