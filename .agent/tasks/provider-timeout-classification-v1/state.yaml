@@ -23,6 +23,6 @@ delivery:
   develop_base: ""
 
 blocked:
-  active: false
-  by: ""
-  reason: ""
+  active: true
+  by: "Analyst"
+  reason: "Owner 已 APPROVE D1–D4，但 D3 要求先把 task.md 的 Design Impact 从 NONE 升级为 UPDATE，并把 docs/design/http-api.md §4 纳入 Scope/交付物/AC（当前 task.md:80 与 :116 仍按 NONE 写）。TaskBuilder 完成该更新前，Contract 与 Task 不相容，不得登记 APPROVED。"
