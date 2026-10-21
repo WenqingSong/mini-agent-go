@@ -16,7 +16,10 @@ owner:
   review_target: "aad9dd4518c90445b32812f5f7174612790598a0"
 
 delivery:
-  status: NOT_RUN
+  status: PASS
+  review_target: "aad9dd4518c90445b32812f5f7174612790598a0"
+  feature_head: "2d947b4c273fd30461588d749dc3eb3f531e2ae4"
+  develop_base: "f417327443afd381d87de1168980cb9c0b22911f"
 
 blocked:
   active: false
