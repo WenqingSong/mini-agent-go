@@ -9,8 +9,8 @@ resources:
   reservations: {}
 
 review:
-  status: NOT_REQUESTED
-  target: ""
+  status: PENDING
+  target: "43ce197ee61ff00ac5b78ec866beae1b42c4bfaf"
 
 owner:
   status: PENDING
