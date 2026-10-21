@@ -45,7 +45,7 @@ Engine 测试与业务测试分开：Engine 用 `GOWORK=off go -C .agent/engine 
 
 ## 宿主项目工程规范
 
-本仓库为 `framework-station/mini-agent-go`，Go 语言项目，业务代码尚未建立。
+本仓库为 `framework-station/mini-agent-go`，Go 语言的单进程 Agent Runtime，提供 HTTP JSON API。业务入口为 `cmd/mini-agent`；当前装配和能力边界见 `README.md`，测试与真实调用记录入口见 `docs/verification.md`。
 
 ### 仓库与分支
 

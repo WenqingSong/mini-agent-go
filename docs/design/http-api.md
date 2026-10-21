@@ -1,8 +1,6 @@
-# Agent Runtime HTTP JSON API（mini-agent-go）
+# HTTP API
 
-> 本文件是项目级长期设计事实：对外 HTTP 契约（端点、字段、错误码域、取消/超时、认证与监听边界、启动与关闭生命周期）与 L3 服务装配边界。
-> 任务内决策过程见 `.agent/tasks/agent-http-api-v1/contract.md`（Owner `APPROVED`，Evidence Commit A1 = `46d871d`）。两者冲突时以 Contract 记录本任务已确认的取舍、以本文件记录跨任务长期事实，出现不一致必须回写，不允许长期漂移。
-> 分层、依赖方向与文件所有权以 `docs/design/runtime-architecture.md` 为准；本文件只补充该文件未覆盖的 HTTP 对外协议事实。
+运行服务和调用示例见 [README](../../README.md)，其他启动方式见[运行指南](../running.md)。本文集中记录三个端点、错误码、配置，以及 HTTP 到 Agent 的提交边界。
 
 ## 1. 范围
 
@@ -97,7 +95,7 @@ type RunOutcome struct {
 | 未知路径 | `404 not_found` |
 | 已知路径方法不符 | `405 method_not_allowed` + `Allow` 头 |
 
-所有响应（含 404/405）都是 §4 的 JSON 错误封套。
+所有路由错误响应（含 404/405）都使用 §4 的 JSON 错误封套。
 
 ## 4. 错误封套与错误码域
 
@@ -177,7 +175,7 @@ type RunOutcome struct {
 
 ## 8. 配置契约
 
-配置只来自环境变量（不新增配置文件、不新增第三方依赖）：
+应用读取进程环境变量；Compose 从 `.env` 注入变量，二进制不会自行读取该文件。默认值来自代码，`.env.example` 可显式覆盖默认值：
 
 | 变量 | 必填 | 默认 | 说明 |
 | --- | --- | --- | --- |
@@ -217,11 +215,11 @@ type RunOutcome struct {
 | INV-H11 | 关闭幂等；宽限期内请求完成，期满取消在途 Run 且不遗留执行中任务 |
 | INV-H12 | v1 禁用压缩：`TokenBudget` 只接受 `0`，占位 `Summarizer` 零调用 |
 
-## 10. 未验证事项与后续归属
+## 10. 当前限制与验证边界
 
-- 真实 Provider 下的端到端时延与 `RequestTimeout = 60s` 是否够用：未验证，属部署/运维评估。
+- 已有真实 Provider 普通对话和计算器调用记录，见[验证说明](../verification.md)。少量成功请求不证明默认 60 秒超时适合所有模型、长对话与负载。
 - 客户端断开时响应不可达的观察口径：只能依赖终态、日志与 `Fake Provider` 的取消观察，无法验证客户端实际收到状态码。
-- Todo 端口适配（`session.TodoOperations` → `builtin.TodoOperations`）、Todo ID 生成与状态迁移、生产 LLM `Summarizer` 与真实 tokenizer 校准：属服务装配任务 T08，不在本协议内；因此 v1 服务不注册 Todo 工具，长会话触达 Provider 限制时以 `provider_failure`（502）结束。
+- Todo 端口适配（`session.TodoOperations` → `builtin.TodoOperations`）、Todo ID 生成与状态迁移、生产 LLM `Summarizer` 与真实 tokenizer 校准：尚未接入默认启动入口；因此 v1 服务不注册 Todo 工具，长会话触达 Provider 限制时以 `provider_failure`（502）结束。
 - 流式输出、异步轮询、TLS、CORS、限流/配额、metrics、持久化、用户体系与 RBAC：未设计，属后续任务。
 
 ## 11. 演进规则
