@@ -2,11 +2,12 @@
 
 ## Decision Status
 
-WAITING_FOR_OWNER_DECISION
+APPROVED
 
-- 本文件是 Analyst 草案（未批准的 A0）：`state.contract.status` 保持 `PENDING`，`state.contract.target` 为空。
-- Owner 决策后：A1 = 本文件定稿 commit（`Selected Design` + `Owner Decision Record` 落定）；A2 只写 `state.contract.status=APPROVED`、`state.contract.target=A1`。
-- 待决问题见 `Selected Design` 的 D1–D4；D3 涉及 Task 声明的 `Design Impact: NONE`，批准前 Analyst 不写 `docs/design/*`。
+- Owner 于 2026-10-21 对 D1–D4 全部作出决定（见 `Owner Decision Record`）。本文件内容即 A1（Contract Evidence Commit）；A2 只写 `state.contract.status=APPROVED`、`state.contract.target=A1`。
+- 前置已由 TaskBuilder 完成（commit `53248a4`）：`task.md` 的 `Design Impact` 由 `NONE` 升级为 `UPDATE`，目标 Design Artifact = `docs/design/http-api.md` §4，并纳入 Scope / AC-007 / Review Baseline。本 Contract 与当前 Task 相容。
+- `Design Impact = UPDATE`：Analyst 在 A1 之后、Coder 实现之前只更新 `docs/design/http-api.md` §4 的三条判定优先级事实，不改状态码映射表、错误码枚举、对外协议与状态机。
+- 历史输入（非当前已批准事实）：A0 草案 commit `f107fa8` 与 `WAITING_FOR_OWNER_DECISION` 状态只保留在 Git 历史中。
 
 ## Problem
 
@@ -37,7 +38,7 @@ WAITING_FOR_OWNER_DECISION
 
 ## Recommendation
 
-RECOMMENDATION：把「已形成的 Run 结论」提升为唯一映射权威，修复只落在 `httpapi/errors.go` 的单一映射入口 `errorCodeOf`，判定顺序改为：
+RECOMMENDATION（Owner 2026-10-21 已全部批准，见 `Owner Decision Record`）：把「已形成的 Run 结论」提升为唯一映射权威，修复只落在 `httpapi/errors.go` 的单一映射入口 `errorCodeOf`，判定顺序改为：
 
 1. 会话哨兵（`errors.Is`，保持最高优先级，覆盖 404/409）；
 2. 若错误链中存在 `*core.RunError`（`errors.As` 命中），则只按其**最外层** `Kind` 映射（`KindOf`），`Cause` 中的 `context.DeadlineExceeded` / `context.Canceled` **不得**改变结果；
@@ -58,12 +59,18 @@ RECOMMENDATION：把「已形成的 Run 结论」提升为唯一映射权威，�
 
 ## Selected Design
 
-等待 Owner 确认。Owner 需决定：
+Owner 2026-10-21 已确认 D1–D4（逐条记录见 `Owner Decision Record`）。Coder 只能在下列约束内实现，不得自行决定公开协议或扩大范围。
 
-- **D1（权威依据与优先级）**：是否采纳「会话哨兵 → 链中最外层 `*core.RunError.Kind` → 裸 ctx 兜底 → `internal`」作为长期判定优先级，明确 `Cause` 中的 ctx 哨兵不得翻转已形成的结论？这是 AC-003 的核心，也是 `docs/design/http-api.md:135` 与实现对齐的方式。
-- **D2（修复落点）**：是否限定生产代码只改 `httpapi/errors.go` 的 `errorCodeOf`（含注释），`checkedCode` 校验项保持不变、不新增 code/Kind 副本校验，`agent` / `llm` / `core` / `session` / `service` 零改动？
-- **D3（Design Impact）**：Owner 在 Task 中声明 `NONE`。Analyst 判断需要在 `docs/design/http-api.md` §4 补一到两句长期事实（「链中存在 `*core.RunError` 时以其 `Kind` 为准，`Cause` 中的 ctx 哨兵不得翻转；仅无 RunError 时才用 ctx 哨兵兜底」），否则同一漂移会再次发生。若 Owner 同意，`Design Impact` 需改为 `UPDATE`，由 Analyst 在 Contract `APPROVED` 后、Coder 实现前只改该节；若坚持 `NONE`，则本任务只在代码注释中记录该规则，文档歧义保留为已知风险。
-- **D4（Provider 超时配置边界）**：确认本任务不改 `cmd/mini-agent`、不新增 Provider `Timeout` 环境变量、不改 `docs/design/http-api.md` §8。若 Owner 希望生产默认具备 Provider 级超时（否则「Provider 自身超时」主要靠上游/传输层表达），应另开任务（涉及新增配置契约）。
+- **D1（权威依据与优先级，APPROVED）**：`errorCodeOf` 的判定顺序固定为
+  1. 会话哨兵（`errors.Is`，最高优先级，覆盖 `404` / `409`）；
+  2. 错误链中存在 `*core.RunError` 时，只按其**最外层** `Kind` 映射；
+  3. 链中不存在 `*core.RunError` 时，才用裸 Context 哨兵兜底（`504` / `408`）；
+  4. 其余 → `internal`。
+  已形成的 `RunError` 分类不得被 `Cause` 中的 `context.Canceled` / `context.DeadlineExceeded` 覆盖。实现必须显式区分「链中有 RunError」与「链中没有」，不能只依赖 `core.KindOf`（它对非 RunError 也返回 `internal`）。
+- **D2（修复落点，APPROVED）**：生产代码原则上只改 `httpapi/errors.go` 的 `errorCodeOf`（含函数注释）；`checkedCode` 的校验项不增不减（不新增 code/Kind 副本校验），`agent` / `llm`（含 `llm/openai`）/ `core` / `session` / `service` / `cmd` 零改动。必须用测试证明：直接错误路径、`RunOutcome` 路径、会话哨兵优先级、既有矛盾状态检测均无回归。若单点修复无法满足已批准 AC，停止并提交证据，不得自行扩大范围。
+- **D3（Design Impact，APPROVED = UPDATE）**：`task.md` 已声明 `Design Impact: UPDATE`（commit `53248a4`）。Analyst 在本 Contract 登记 `APPROVED` 后、Coder 实现前只更新 `docs/design/http-api.md` §4，且只记录三条事实：已有 `RunError.Kind` 是 HTTP 错误分类的权威依据；底层 `Cause` 中的 Context 哨兵不能覆盖已形成的分类；没有 `RunError` 时 Context 哨兵作为兜底。不修改既有 HTTP 状态码映射表、协议与状态机。
+- **D4（Provider 超时配置边界，APPROVED）**：不修改 `cmd/mini-agent`，不新增 Provider `Timeout` 配置，不调整生产默认超时策略。
+- 本次批准不授权提前修改生产代码，也不授权合并到 `develop`。
 
 ## Interfaces and Data
 
@@ -97,7 +104,7 @@ RECOMMENDATION：把「已形成的 Run 结论」提升为唯一映射权威，�
 
 - `httpapi/errors.go`：调整 `errorCodeOf` 判定顺序（含函数注释），语义即 INV-001。
 - `httpapi/errors_test.go`、`httpapi/handler_test.go`、`httpapi/lifecycle_test.go`、`httpapi/fake_test.go`：新增/补充分类表驱动用例、全链路用例、可注入错误的 Provider 替身、Session 快照与 `run_finished` 断言。
-- `docs/design/http-api.md` §4：仅当 D3 被 Owner 批准为 `UPDATE` 时，由 Analyst 在 Contract `APPROVED` 后、Coder 实现前补充 1–2 句优先级事实（Coder 不改 Design）。
+- `docs/design/http-api.md` §4：D3 已批准为 `UPDATE`，由 Analyst 在 Contract `APPROVED`（A1）之后、Coder 实现前补充三条优先级事实；该变更属 Analyst 交付物，Coder 的 `review.target` 不得包含 Design 改动，也不得再修改 Design。
 
 禁止：
 
@@ -126,17 +133,24 @@ RECOMMENDATION：把「已形成的 Run 结论」提升为唯一映射权威，�
 - INV-004 / AC-005 → 请求前用 `Manager.Save` 预置带 `Messages` / `Summary` / `Todos` 的基线，两类超时各触发一次，请求后用 `Manager.Get` 逐字段比对（消息逐条、Summary、Todos），并断言 `core.ValidateMessages` 通过。
 - INV-005 / AC-004 → 复用既有用例：裸 ctx 408/504（`errors_test.go:159-160`、`handler_test.go:230-239`）、请求级超时 504（`lifecycle_test.go:293`）、Provider 4xx/429/5xx → 502、会话三类哨兵（含预检不执行 Run、零写入）、`checkedCode` 矛盾拒绝、工具失败/重复 `CallID`、LLM/工具预算、`finish_reason` 三类异常。当前无覆盖的情形补最小用例。
 - AC-006 → 可逆 Mutation：临时把 `errorCodeOf` 改回「ctx 哨兵先于 Kind」，确认 INV-001/002 的新测试失败；恢复后全绿；不得把 Mutation 痕迹带入提交。命令：`go build ./...`、`go vet ./...`、`go test ./...`、`go test -race ./...`、`make test` 均退出码 0。
-- AC-007 → Cleaner 核对 `review.target` 完整 diff 路径集合是否只落在 Allowed 清单；确认 `agent`/`llm`/`core`/`session`/`service`/`cmd`/`.agent/engine` 零变更，无 `e2e/` 或其他任务文件混入。
+- AC-007 → Cleaner 核对 `review.target` 完整 diff 路径集合是否只落在 Allowed 清单；确认 `agent`/`llm`/`core`/`session`/`service`/`cmd`/`.agent/engine` 零变更，无 `e2e/` 或其他任务文件混入；并核对 `docs/design/http-api.md` §4（Analyst 在 A1 之后落库）只含三条优先级事实、状态码映射表与错误码枚举未被改动，实现与该节一致。
 
 ## Open Risks
 
 - 默认生产装配未设置 Provider `Timeout`（`cmd/mini-agent/main.go:269-273`），因此「Provider 自身超时 + 链含 ctx 哨兵」在默认配置下的可达途径有限（注入 `HTTPClient`、Provider 自派生 deadline、上游库包裹 ctx 哨兵）。本修复纠正的是**分类规则**（对上述任意来源都成立），不改变可达性；若期望生产默认具备 Provider 级超时，需另开任务（D4）。
 - 直接错误路径若收到非 `*core.RunError` 的裸 `*url.Error`（当前装配不存在），其 ctx 哨兵仍会把 Provider 超时映射为 504；本任务不覆盖该形状，避免为不存在路径引入推断规则。
-- `KindInvalidArgument` 携带 ctx `Cause` 时，映射将从 504 变为 `internal`。这是「结论优先」的直接推论，更符合 `docs/design/http-api.md:135`；若 Owner 认为需要保持旧行为，须在 D1 明确例外（Analyst 不建议）。
-- 若 Owner 选择 `Design Impact = NONE`（D3），`docs/design/http-api.md` §4 仍缺少「ctx 兜底仅适用于非 RunError」的表述，后续实现者可能再次引入相同漂移。
+- `KindInvalidArgument` 携带 ctx `Cause` 时，映射将从 504 变为 `internal`。这是「结论优先」的直接推论，更符合 `docs/design/http-api.md:135`；Owner D1 已批准该优先级且未设例外，Coder 不得为该形状保留 ctx 覆盖。
+- D3 已批准为 `UPDATE`：`docs/design/http-api.md` §4 将由 Analyst 在 A1 之后记录该优先级（三条事实）。Cleaner 需按 AC-007 核对 Task ↔ Contract ↔ Design §4 ↔ 实现四者一致。
 - 全链路测试需要真实 `openai.Client` + `httptest` 慢上游；若 CI 环境对毫秒级超时敏感，需用足够的时间余量（例如上游 200ms / 客户端 50ms）避免 flaky，且不得依赖外网。
 - 请求级超时测试依赖 `RequestTimeout` 极短值，需避免与 Session 预检、runner 装配竞争导致偶发 502/500；建议通过可取消的请求 context 控制触发点。
 
 ## Owner Decision Record
 
-等待 Owner 确认（D1–D4）。
+Owner 于 2026-10-21 针对 Contract 草案 `f107fa8` 作出决定：**APPROVE D1 / D2 / D3 / D4**。
+
+- **D1 — APPROVED**：采用「会话哨兵 → 链中最外层 `*core.RunError.Kind` → 裸 Context 哨兵兜底 → `internal`」的分类优先级；已形成的 `RunError` 分类不得被 `Cause` 中的 `context.Canceled` / `context.DeadlineExceeded` 覆盖。适用范围：`httpapi` 错误分类入口的全部路径（直接错误路径与 `RunOutcome` 路径）。
+- **D2 — APPROVED**：生产代码原则上只修改 `httpapi/errors.go` 的 `errorCodeOf`，不修改 `checkedCode`、Agent、LLM、Core 或 Session；但必须通过测试证明直接错误路径、`RunOutcome` 路径、会话哨兵优先级以及既有矛盾状态检测均无回归。若单点修复无法满足已批准 AC，停止并提交证据，不得自行扩大范围。
+- **D3 — APPROVED**：`Design Impact` 由 `NONE` 正式升级为 `UPDATE`；先由 TaskBuilder 更新任务定义（已完成，`53248a4`），再由 Analyst 对齐 Contract 并在批准范围内更新 `docs/design/http-api.md` §4；该节只记录三条事实（`RunError.Kind` 为权威依据、`Cause` 中 Context 哨兵不得覆盖、无 `RunError` 时 Context 哨兵兜底），不修改既有 HTTP 状态码映射表、协议和状态机。
+- **D4 — APPROVED**：不修改 `cmd/mini-agent`，不新增 Provider `Timeout` 配置，也不调整生产默认超时策略。范围：仅本任务；生产 Provider 级超时若需要，属后续独立任务。
+- 实施要求（Owner 原文要点）：保持最小修复范围；重点验证 Provider 超时 `502 / provider_failure / FAILED`、请求级超时 `504 / deadline_exceeded / CANCELLED`、Provider `Cause` 含 Context 哨兵不被误分类、既有会话错误/直接取消/直接超时/Provider 错误/`checkedCode` 行为不回归、Session 无半轮提交、回归测试具有实际判别力。
+- 流程要求：Contract 与 Design 流程完成、Owner 批准状态有效且 `coder-start` Gate `PASS` 后，才交 Coder 实现；本次批准不授权提前修改生产代码，也不授权合并到 `develop`。
