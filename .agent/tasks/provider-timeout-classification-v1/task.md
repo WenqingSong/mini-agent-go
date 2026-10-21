@@ -15,7 +15,8 @@
   - `core.RunError.Unwrap` / `core.KindOf` / `core.StatusOf` 与 `context.Canceled` / `context.DeadlineExceeded` 在错误链上的关系；
   - Provider（`llm/openai/client.go`）自身超时被归为 `deadline_exceeded` 的事实，以及它与 Agent Loop 重新归因为 `provider_failure` 之间的层间差异。
 - 明确「已确定的 Run 终态 + `ErrorKind`」与「底层 `Cause` 中的 ctx 哨兵」谁是权威依据，并覆盖直接错误路径与 RunOutcome 路径的不同语义。
-- 最小范围生产代码修复：优先在 HTTP 错误分类入口收敛，不无依据地修改 Agent Loop、LLM Client 或公共数据模型。若经 Contract 授权的修复必须触及 `llm/openai` 或 `agent`，以 Contract 写明的最小必要范围为准。
+- 最小范围生产代码修复：Owner D2 已决定生产改动只落在 `httpapi/errors.go` 的 `errorCodeOf`，不改 `llm/openai`、`agent`、`core`、`session`、`service`、`cmd`。若实现中发现必须突破该边界，停止并请求 Owner 决策，不得自行扩大。
+- Design 交付物（Task 声明，不是 Coder 的实现范围）：更新 `docs/design/http-api.md` §4 的错误码判定优先级事实（仅该节；按 `## Design Impact` 的三条事实口径），由 Analyst 在 Contract 经 Owner 批准并登记 `APPROVED` 之后、Coder 实现之前落库；Coder 不得修改 `docs/design/*`。
 - 关键回归测试：Provider 自身超时、请求级超时、请求 ctx 仍有效但错误链含 `context.DeadlineExceeded` / `context.Canceled`、既有映射不回归、Session 不产生半轮历史。
 - 验证：构建、静态检查、单元测试、Race Test 通过（命令见 Verification）。
 
@@ -33,6 +34,22 @@
 - 全局资源占用：本任务不新增 Shared Resource，`state.resources.reservations` 保持空。
 
 如果发现必须突破上述范围才能满足 AC，停止并请求 Owner 决策。
+
+## Design Impact
+
+Design Impact: UPDATE
+
+Design Artifact: `docs/design/http-api.md` §4（错误封套与错误码域：错误码判定优先级与 Context 兜底）
+
+本次只更新该节的判定优先级事实，且只允许记录三条事实：
+
+- 已有的 `core.RunError.Kind` 是 HTTP 错误分类的权威依据；
+- 底层 `Cause` 中的 `context.Canceled` / `context.DeadlineExceeded` 不得覆盖已形成的分类；
+- 错误链中不存在 `*core.RunError` 时，Context 哨兵作为兜底判定。
+
+明确不改变：既有 HTTP 错误码 → 状态码映射表、错误码枚举（`ErrorCode`）、对外协议与状态机。
+
+责任与时序：该 Design 更新是 Task 声明的 Design 交付物，由 Analyst 在 Contract 经 Owner 批准并登记 `APPROVED` 之后、Coder 实现之前落库；Coder 不得修改 `docs/design/*`。Design 更新与实现同批交付，由 Cleaner 做 Task ↔ APPROVED Contract ↔ `docs/design/http-api.md` §4 ↔ 最终 Implementation 四方核对。
 
 ## Acceptance Criteria
 
@@ -60,7 +77,7 @@
   - 测试断言真实观测值：HTTP 状态码与 `error.code`、Run 的 `Status` 与 `ErrorKind`、`run_finished` 的 `status` / `error_kind`、Session 快照，不得只断言 mock 调用次数或内部函数返回值。
   - 至少对关键分类逻辑做一次可逆 Mutation（临时回退为错误实现），证明新增测试会失败；Mutation 需恢复原状并记录在 Coder 交接中，由 Cleaner 独立复核。
   - 既有相关测试与全量测试通过，`go test -race ./...` 通过。
-- [ ] AC-007：交付边界正确：生产代码变更落在本任务 Scope 与 APPROVED Contract 授权范围内（默认预期集中在 HTTP 错误映射入口及其测试辅助；任何 `agent` / `llm` / `core` / `session` 变更必须在 Contract 中列明并经 Owner 批准）；不修改原 E2E 任务的业务断言以求通过；不混入其他任务的未提交文件；与 `docs/design/*` 既有长期事实不冲突；`review.target` 指向明确的 Implementation Commit。
+- [ ] AC-007：交付边界正确：生产代码只落在 APPROVED Contract 授权范围内（Owner D2：仅 `httpapi/errors.go` 的 `errorCodeOf`；任何越界改动必须在 Contract 中列明并经 Owner 批准）；Task ↔ APPROVED Contract ↔ `docs/design/http-api.md` §4 ↔ 最终 Implementation 四者一致，Design 该节只记录 `## Design Impact` 列出的三条事实，且不改变既有状态码映射表、错误码枚举、对外协议与状态机；不修改原 E2E 任务的业务断言以求通过；不混入其他任务的未提交文件；`review.target` 指向明确的 Implementation Commit。
 
 ## Relevant Context
 
@@ -76,8 +93,8 @@
 - 已核实事实：根模块 Go 版本 1.24，零第三方依赖；`Makefile` 提供 `test`（`go test ./...`）、`build`、`vet`、`test-engine`；`-race` 未进入 CI，需显式执行。`.agent/engine` 是独立 module，与本任务无关且不应改动。
 - Assumption：Provider 自身超时时其错误链中确实会出现 `context.DeadlineExceeded`（Owner 现场报告，且 `llm/openai` 在客户端超时路径保留 `*url.Error` 为 `Cause` 的行为支持该现象）；精确的链形态由 Analyst 用最小复现固化，不由 TaskBuilder 猜测。
 - Assumption：本工作区 `git status --short --untracked-files=all` 为空，未出现 Owner 提到的 `e2e/` 未跟踪文件，推测其属于原 E2E 工作区而非本工作区；本任务仍按「不得清理、覆盖或混入」的约束执行。
-- OPEN QUESTION（不阻塞，交 Analyst 以证据决定并写入 Contract）：满足 AC-001 是否必须同时调整 `llm/openai` 对「客户端自身超时」的分类；Owner 要求不无依据地修改 LLM Client，故该判断不得由 Coder 自行作出。
-- Design Impact：Owner 声明为 `NONE`（不改变错误码枚举、状态码映射表或外部协议语义，仅是让实现符合 `docs/design/http-api.md` §4 已记录的判定优先级）。若 Analyst 判定必须修改 `docs/design/*` 的长期措辞才能自洽，则属 `UPDATE`，须先报告 Owner 申请变更，不得自行扩大 Scope。
+- 已决事实（Owner D2）：不改 `llm/openai`，也不改 `cmd/mini-agent`、不新增 Provider `Timeout` 配置；Provider 自身超时的分类由 HTTP 映射入口（`httpapi/errors.go` 的 `errorCodeOf`）修复。`llm/openai` 现有的「客户端自身超时 → `KindDeadlineExceeded` 且保留 `Cause`」行为保持不变，因此 HTTP 层必须能在请求 ctx 仍有效时正确忽略 `Cause` 中的 ctx 哨兵。
+- 已决事实（Owner D4）：生产装配（`cmd/mini-agent`）与默认超时配置保持现状，本任务不新增任何 Provider 超时配置项，也不改变 `RequestTimeout` 的默认值。
 
 ## Verification
 
@@ -87,7 +104,7 @@
 - AC-004 → 回归用例：直接 ctx 超时/取消（非结论路径）、客户端断开（`cancel()` 后断言终态 `CANCELLED + cancelled` 且未提交）、Provider 4xx/429/5xx、Session 三类哨兵（含预检不执行 Run、不产生写入）、`checkedCode` 矛盾拒绝、工具失败与重复 `CallID`、LLM/工具预算耗尽、`finish_reason` 三类异常。优先沿用 `httpapi` / `service` 既有用例并确认仍通过；如某情形当前无覆盖，补最小用例。
 - AC-005 → 原子性测试：请求前用 `session.Manager.Save` 写入带 Summary / Todo / 历史的基线，分别触发 Provider 超时与请求级超时，请求后用 `Manager.Get` 逐字段比对（消息逐条、Summary、Todo），断言完全相等。
 - AC-006 → 可逆 Mutation：临时把分类逻辑回退为修复前行为（或等价地把结论优先级反转），确认 AC-001/AC-002/AC-003 的新测试失败，然后恢复并全绿；清理 Mutation 痕迹，确保不进入提交。命令：`go build ./...`、`go vet ./...`、`go test ./...`、`go test -race ./...`、`make test` 均退出码 0；另确认 `.agent/engine` 未受影响（可不重跑，若重跑须 `GOWORK=off go -C .agent/engine test ./...`）。
-- AC-007 → Cleaner 核对 `review.target` 完整 diff 的路径集合与 APPROVED Contract 授权清单、`state.yaml` 与任务文件归属；确认无 `e2e/` 或其他任务文件混入（禁止 `git add -A` / `git add .`）。
+- AC-007 → Cleaner 四方核对：`review.target` 完整 diff 的路径集合必须落在 APPROVED Contract 授权清单内（Task ↔ APPROVED Contract ↔ `docs/design/http-api.md` §4 ↔ 最终 Implementation 四者一致），核对 `state.yaml` 与任务文件归属；确认 `docs/design/http-api.md` §4 只记录 `## Design Impact` 列出的三条事实、未改动状态码映射表与错误码枚举；确认无 `e2e/` 或其他任务文件混入（禁止 `git add -A` / `git add .`）。
 - 环境要求：Linux + Go 1.24.x（race detector 可用）+ GNU Make；无需 MySQL / Redis / MQ / Docker；全程本地测试，不调用真实付费模型，不以网络可达作为通过条件。
 
 ## Complexity
@@ -97,6 +114,8 @@ COMPLEX
 原因：表象是一个映射优先级问题，但根因尚未被证据固化（Provider 自身超时为何在链上带 `context.DeadlineExceeded`、哪一层才是权威），且存在多个会产生不同可观察结果的现实方案（只收敛 HTTP 映射入口，还是同时调整 `llm/openai` 对客户端超时的归类；结论优先权落在 `checkedCode` 还是 `errorCodeOf`；是否需要在 `checkedCode` 增加 code 层一致性校验）。这些问题同时受长期 Design 已记录的判定优先级约束，属错误语义与公开协议边界，须由 Analyst 分析、Owner 在 Contract 中确认。
 
 ## Analyst Questions
+
+以下问题中第 2、3 项已由 Owner D1（错误分类优先级）与 D2（生产改动只改 `httpapi/errors.go` 的 `errorCodeOf`）决定，原文仅作调查记录；其余问题仍待 Analyst 在 Contract 中收口。
 
 1. 根因确认：请给出 Provider 自身超时导致错误链中出现 `context.DeadlineExceeded`（以及可能出现的 `context.Canceled`）的最小可复现构造，并说明它来自 `llm/openai` 的客户端超时归类、传输层 `*url.Error` 包裹，还是上层派生 context；哪些构造在请求 ctx 仍有效时会真实出现，哪些只是防御性场景。
 2. 权威依据与优先级：当 Run 已给出无矛盾的终态 + `ErrorKind` 时，HTTP 映射的唯一权威是什么？`Cause` 中的 ctx 哨兵在什么情况下仍可用于映射（非 `*core.RunError` 的 ctx 错误、会话哨兵、包装错误）？该结论与 `docs/design/http-api.md` §4 现行措辞是否完全兼容，还是需要 Design 文案变更（若需要，属 `Design Impact: UPDATE`，须先交 Owner 批准）。
@@ -110,10 +129,10 @@ COMPLEX
 ## Review Baseline
 
 - Base commit：`0977f243df0348fa5e526b8d954e3f9a2720237d`（`merge: 合并 feat/agent-project-docs-v1 到 develop`）。
-- 任务基线核实：当前分支 `fix/provider-timeout-classification-v1`（Owner 已预先准备），HEAD 与 `origin/fix/provider-timeout-classification-v1`、`origin/develop` 同为 `0977f24`，未领先、未落后；remote feature 分支已存在（`workflow-check` 出口 Gate 的 `handoffReady` 前提可满足）。
+- 任务基线核实：任务 Base commit 为 `0977f24`（当时 `origin/develop`）。当前分支 `fix/provider-timeout-classification-v1`（Owner 已预先准备）HEAD 为 `100743a`，由 `94a9c53`（TaskBuilder 任务定义）、`f107fa8`（Analyst A0 Contract 草案）、`100743a`（Analyst 阻塞状态 commit）组成；工作区 clean，local == `origin/fix/provider-timeout-classification-v1`；remote feature 分支已存在（`workflow-check` 出口 Gate 的 `handoffReady` 前提可满足）。
 - 任务开始时已有修改：无。`git status --short --untracked-files=all` 为空，无暂存内容、无未跟踪文件。
 - 任务分支边界：本任务只负责在 `fix/provider-timeout-classification-v1` 上交付；不得合并/推送 `develop`、不得创建或删除分支、不得改动 `main`。
-- 重叠修改的区分方式：TaskBuilder 只拥有 `.agent/tasks/provider-timeout-classification-v1/{task.md,state.yaml,findings.md,core-logic.md,owner-decision.md,delivery.md}`；预期生产变更集中在 `httpapi/errors.go`（必要时含 `httpapi/run.go`、`httpapi/handler.go`）与 `httpapi/*_test.go`（必要时含 `service/*_test.go` 测试辅助）；`agent/**`、`llm/**`、`core/**`、`session/**`、`contextmgr/**` 在本任务中预期零变更，任何改动必须在 APPROVED Contract 中列明并经 Owner 批准；`docs/design/**` 在 `Design Impact: NONE` 下预期零变更。发现他人遗留 dirty 文件 → STOP 并报告，不 `git add -A` / `git add .`、不 stash、不覆盖。
+- 重叠修改的区分方式：TaskBuilder 只拥有 `.agent/tasks/provider-timeout-classification-v1/{task.md,state.yaml,findings.md,core-logic.md,owner-decision.md,delivery.md}`；生产变更按 Owner D2 只允许出现在 `httpapi/errors.go` 的 `errorCodeOf`，测试变更落在 `httpapi/*_test.go`（如需同链路装配，复用 `httpapi` 包内既有的 `service` 装配方式，不改 `service/**`）；`docs/design/http-api.md` §4 的本次更新由 Analyst 负责；`docs/design/**` 其余内容与 `agent/**`、`llm/**`、`core/**`、`session/**`、`service/**`、`cmd/**` 仍预期零变更。发现他人遗留 dirty 文件 → STOP 并报告，不 `git add -A` / `git add .`、不 stash、不覆盖。
 - 保护约束：原 E2E 任务工作区存在未跟踪的 `e2e/` 文件（本工作区未见）；本任务不得清理、覆盖或把这些文件混入提交。
 
 ## Initial Route
