@@ -1,11 +1,13 @@
 package httpapi_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
@@ -14,6 +16,8 @@ import (
 	"cnb.cool/framework-station/mini-agent-go/core"
 	"cnb.cool/framework-station/mini-agent-go/httpapi"
 	"cnb.cool/framework-station/mini-agent-go/llm"
+	"cnb.cool/framework-station/mini-agent-go/llm/openai"
+	"cnb.cool/framework-station/mini-agent-go/runlog"
 	"cnb.cool/framework-station/mini-agent-go/service"
 	"cnb.cool/framework-station/mini-agent-go/session"
 	"cnb.cool/framework-station/mini-agent-go/tool"
@@ -225,6 +229,101 @@ func TestChatErrorMapping(t *testing.T) {
 			outcome:    httpapi.RunOutcome{Status: core.RunStatusCancelled, Err: core.NewError(core.KindCancelled, "test", "取消")},
 			wantStatus: http.StatusRequestTimeout,
 			wantCode:   httpapi.CodeCancelled,
+		},
+		{
+			name: "provider 失败且 Cause 为 ctx 超时",
+			outcome: httpapi.RunOutcome{Status: core.RunStatusFailed, LLMCalls: 1, Err: &core.RunError{
+				Kind:    core.KindProviderFailure,
+				Op:      "test",
+				Message: "模型调用失败",
+				Cause:   context.DeadlineExceeded,
+			}},
+			wantStatus: http.StatusBadGateway,
+			wantCode:   httpapi.CodeProviderFailure,
+		},
+		{
+			name: "provider 失败且 Cause 为 ctx 取消",
+			outcome: httpapi.RunOutcome{Status: core.RunStatusFailed, LLMCalls: 1, Err: &core.RunError{
+				Kind:    core.KindProviderFailure,
+				Op:      "test",
+				Message: "模型调用失败",
+				Cause:   context.Canceled,
+			}},
+			wantStatus: http.StatusBadGateway,
+			wantCode:   httpapi.CodeProviderFailure,
+		},
+		{
+			name: "provider 失败且 Cause 为多层包装的 ctx 哨兵",
+			outcome: httpapi.RunOutcome{Status: core.RunStatusFailed, LLMCalls: 1, Err: &core.RunError{
+				Kind:    core.KindProviderFailure,
+				Op:      "test",
+				Message: "模型调用失败",
+				Cause:   fmt.Errorf("传输层: %w", fmt.Errorf("读取响应: %w", context.DeadlineExceeded)),
+			}},
+			wantStatus: http.StatusBadGateway,
+			wantCode:   httpapi.CodeProviderFailure,
+		},
+		{
+			name: "超时终态且 Cause 为 ctx 超时",
+			outcome: httpapi.RunOutcome{Status: core.RunStatusCancelled, Err: &core.RunError{
+				Kind:    core.KindDeadlineExceeded,
+				Op:      "test",
+				Message: "请求超时",
+				Cause:   context.DeadlineExceeded,
+			}},
+			wantStatus: http.StatusGatewayTimeout,
+			wantCode:   httpapi.CodeDeadlineExceeded,
+		},
+		{
+			name: "取消终态且 Cause 为 ctx 超时",
+			outcome: httpapi.RunOutcome{Status: core.RunStatusCancelled, Err: &core.RunError{
+				Kind:    core.KindCancelled,
+				Op:      "test",
+				Message: "请求取消",
+				Cause:   context.DeadlineExceeded,
+			}},
+			wantStatus: http.StatusRequestTimeout,
+			wantCode:   httpapi.CodeCancelled,
+		},
+		{
+			name: "会话哨兵包在 RunError 内",
+			outcome: httpapi.RunOutcome{Status: core.RunStatusFailed, Err: &core.RunError{
+				Kind:    core.KindInternal,
+				Op:      "test",
+				Message: "会话已变化",
+				Cause:   session.ErrSessionNotFound,
+			}},
+			wantStatus: http.StatusNotFound,
+			wantCode:   httpapi.CodeSessionNotFound,
+		},
+		{
+			name: "invalid_argument 携带 ctx 超时",
+			outcome: httpapi.RunOutcome{Status: core.RunStatusFailed, Err: &core.RunError{
+				Kind:    core.KindInvalidArgument,
+				Op:      "test",
+				Message: "参数非法",
+				Cause:   context.DeadlineExceeded,
+			}},
+			wantStatus: http.StatusInternalServerError,
+			wantCode:   httpapi.CodeInternal,
+		},
+		{
+			name:       "Runner 返回包装的 ctx 超时",
+			err:        fmt.Errorf("外层: %w", context.DeadlineExceeded),
+			wantStatus: http.StatusGatewayTimeout,
+			wantCode:   httpapi.CodeDeadlineExceeded,
+		},
+		{
+			name:       "Runner 返回包装的 ctx 取消",
+			err:        fmt.Errorf("外层: %w", context.Canceled),
+			wantStatus: http.StatusRequestTimeout,
+			wantCode:   httpapi.CodeCancelled,
+		},
+		{
+			name:       "Runner 返回非 RunError 普通错误",
+			err:        errors.New("boom"),
+			wantStatus: http.StatusInternalServerError,
+			wantCode:   httpapi.CodeInternal,
 		},
 		{
 			name:       "Runner 返回 ctx 取消",
@@ -550,4 +649,263 @@ func messageText(message core.Message) string {
 		builder.WriteString(part.Text)
 	}
 	return builder.String()
+}
+
+// timeoutBaseline 返回带历史、摘要与 Todo 的会话基线：失败轮必须逐字段保持不变。
+func timeoutBaseline() session.Session {
+	return session.Session{
+		ID:       "s-1",
+		Messages: []core.Message{userTexture("已提交用户"), assistantTexture("已提交回答")},
+		Summary:  "上一轮摘要",
+		Todos: []session.Todo{{
+			ID:     "todo-1",
+			Title:  "保留待办",
+			Status: session.TodoStatusPending,
+		}},
+	}
+}
+
+// newSlowUpstream 返回延迟响应的 Chat Completions 上游，用于制造 Provider 客户端自身超时。
+func newSlowUpstream(t *testing.T, delay time.Duration) *httptest.Server {
+	t.Helper()
+	upstream := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(delay):
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(upstream.Close)
+	return upstream
+}
+
+// newStatusUpstream 返回固定 HTTP 状态码的上游，用于验证 Provider 4xx / 429 / 5xx 的映射。
+func newStatusUpstream(t *testing.T, status int) *httptest.Server {
+	t.Helper()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(status)
+	}))
+	t.Cleanup(upstream.Close)
+	return upstream
+}
+
+// newProviderClient 构造真实的 OpenAI 兼容 Client。
+func newProviderClient(t *testing.T, baseURL string, timeout time.Duration) *openai.Client {
+	t.Helper()
+	client, err := openai.NewClient(openai.Config{BaseURL: baseURL, APIKey: "test-key", Timeout: timeout})
+	if err != nil {
+		t.Fatalf("构造 Provider Client 失败：%v", err)
+	}
+	return client
+}
+
+// TestProviderFailureClassificationEndToEnd 全链路证明 Provider 自身失败时 HTTP、Run 结论与
+// run_finished 三处一致为 provider_failure / FAILED / 502，且错误链中的 ctx 哨兵不得改变映射。
+func TestProviderFailureClassificationEndToEnd(t *testing.T) {
+	cases := []struct {
+		name     string
+		provider func(t *testing.T) llm.Provider
+		// wantCtxSentinel 断言本构造的错误链确实含有 context.DeadlineExceeded。
+		wantCtxSentinel bool
+	}{
+		{
+			name: "客户端自身超时（链含 context.DeadlineExceeded）",
+			provider: func(t *testing.T) llm.Provider {
+				return newProviderClient(t, newSlowUpstream(t, 500*time.Millisecond).URL, 50*time.Millisecond)
+			},
+			wantCtxSentinel: true,
+		},
+		{
+			name: "Provider 返回普通错误（链中无 ctx 哨兵）",
+			provider: func(t *testing.T) llm.Provider {
+				return &failingProvider{onComplete: func(context.Context) (llm.Response, error) {
+					return llm.Response{}, errors.New("上游连接被拒绝")
+				}}
+			},
+		},
+		{
+			name: "上游返回 HTTP 429",
+			provider: func(t *testing.T) llm.Provider {
+				return newProviderClient(t, newStatusUpstream(t, http.StatusTooManyRequests).URL, 0)
+			},
+		},
+		{
+			name: "上游返回 HTTP 500",
+			provider: func(t *testing.T) llm.Provider {
+				return newProviderClient(t, newStatusUpstream(t, http.StatusInternalServerError).URL, 0)
+			},
+		},
+	}
+
+	for _, item := range cases {
+		t.Run(item.name, func(t *testing.T) {
+			manager := newManager()
+			base := timeoutBaseline()
+			seedSessionState(t, manager, base)
+
+			var logBuffer bytes.Buffer
+			runner := newRealRunner(t, item.provider(t), manager, runlog.NewJSONSink(&logBuffer))
+			server := newTestServer(t, testConfig(""), httpapi.Deps{Sessions: manager, Runner: runner})
+
+			result := doRequest(t, server.Client(), http.MethodPost, server.URL+"/v1/chat", "application/json",
+				`{"session_id":"s-1","message":"这一轮应失败"}`, "")
+			decodeError(t, result, http.StatusBadGateway, httpapi.CodeProviderFailure)
+
+			finished := lastRunFinished(t, &logBuffer)
+			if finished.Status != string(core.RunStatusFailed) || finished.ErrorKind != string(core.KindProviderFailure) {
+				t.Fatalf("run_finished = (status=%q,error_kind=%q)，期望 (FAILED,provider_failure)",
+					finished.Status, finished.ErrorKind)
+			}
+
+			// 直接读取 Run 结论，确认终态与 ErrorKind 同源，而不是只看 HTTP 或日志。
+			outcome, err := runner.Run(context.Background(), httpapi.RunRequest{
+				SessionID: "s-1",
+				RunID:     "direct-run",
+				Message:   "再次失败",
+			})
+			if err != nil {
+				t.Fatalf("Run 已形成结论却返回 error：%v", err)
+			}
+			if outcome.Status != core.RunStatusFailed || core.KindOf(outcome.Err) != core.KindProviderFailure {
+				t.Fatalf("RunOutcome = (%s,%s)，期望 (FAILED,provider_failure)",
+					outcome.Status, core.KindOf(outcome.Err))
+			}
+			if got := errors.Is(outcome.Err, context.DeadlineExceeded); got != item.wantCtxSentinel {
+				t.Fatalf("错误链含 context.DeadlineExceeded = %v，期望 %v（错误：%v）",
+					got, item.wantCtxSentinel, outcome.Err)
+			}
+
+			assertSessionStateEqual(t, manager, base)
+		})
+	}
+}
+
+// TestRequestTimeoutClassificationEndToEnd 全链路证明请求级超时统一为
+// 504 deadline_exceeded / CANCELLED + deadline_exceeded，且不产生半轮历史。
+func TestRequestTimeoutClassificationEndToEnd(t *testing.T) {
+	t.Run("Provider 已观察到请求 ctx 到期", func(t *testing.T) {
+		provider := &failingProvider{onComplete: func(ctx context.Context) (llm.Response, error) {
+			<-ctx.Done()
+			return llm.Response{}, ctx.Err()
+		}}
+		manager := newManager()
+		base := timeoutBaseline()
+		seedSessionState(t, manager, base)
+
+		var logBuffer bytes.Buffer
+		runner := newRealRunner(t, provider, manager, runlog.NewJSONSink(&logBuffer))
+		cfg := testConfig("")
+		cfg.RequestTimeout = 40 * time.Millisecond
+		server := newTestServer(t, cfg, httpapi.Deps{Sessions: manager, Runner: runner})
+
+		result := doRequest(t, server.Client(), http.MethodPost, server.URL+"/v1/chat", "application/json",
+			`{"session_id":"s-1","message":"请求级超时"}`, "")
+		decodeError(t, result, http.StatusGatewayTimeout, httpapi.CodeDeadlineExceeded)
+
+		finished := lastRunFinished(t, &logBuffer)
+		if finished.Status != string(core.RunStatusCancelled) || finished.ErrorKind != string(core.KindDeadlineExceeded) {
+			t.Fatalf("run_finished = (status=%q,error_kind=%q)，期望 (CANCELLED,deadline_exceeded)",
+				finished.Status, finished.ErrorKind)
+		}
+
+		assertSessionStateEqual(t, manager, base)
+	})
+
+	t.Run("等待会话执行权期间到期（尚未发起模型调用）", func(t *testing.T) {
+		provider := &failingProvider{}
+		manager := newManager()
+		base := timeoutBaseline()
+		seedSessionState(t, manager, base)
+
+		runner := newRealRunner(t, provider, manager, runlog.Discard())
+		cfg := testConfig("")
+		cfg.RequestTimeout = 40 * time.Millisecond
+		server := newTestServer(t, cfg, httpapi.Deps{Sessions: manager, Runner: runner})
+
+		// 先占住会话执行权，使本次 chat 在排队阶段就到期，Provider 不会被调用。
+		holding := make(chan struct{})
+		release := make(chan struct{})
+		held := make(chan struct{})
+		go func() {
+			defer close(held)
+			_ = manager.RunTurn(context.Background(), "s-1", func(*session.Turn) error {
+				close(holding)
+				<-release
+				return nil
+			})
+		}()
+		select {
+		case <-holding:
+		case <-time.After(3 * time.Second):
+			t.Fatal("占住执行权的 RunTurn 未启动")
+		}
+
+		result := doRequest(t, server.Client(), http.MethodPost, server.URL+"/v1/chat", "application/json",
+			`{"session_id":"s-1","message":"排队超时"}`, "")
+		decodeError(t, result, http.StatusGatewayTimeout, httpapi.CodeDeadlineExceeded)
+
+		close(release)
+		select {
+		case <-held:
+		case <-time.After(3 * time.Second):
+			t.Fatal("占住执行权的 RunTurn 未结束")
+		}
+		if provider.callCount() != 0 {
+			t.Fatalf("请求级超时不得发起模型调用，实际调用 %d 次", provider.callCount())
+		}
+		assertSessionStateEqual(t, manager, base)
+	})
+}
+
+// TestProviderFinishSemanticsMappingEndToEnd 全链路核对模型结束语义异常仍为 502 provider_failure。
+func TestProviderFinishSemanticsMappingEndToEnd(t *testing.T) {
+	cases := []struct {
+		name     string
+		response llm.Response
+	}{
+		{
+			name: "finish_reason=length",
+			response: llm.Response{
+				Message:      assistantTexture("被截断的回答"),
+				FinishReason: llm.FinishReason("length"),
+			},
+		},
+		{
+			name: "finish_reason=tool_calls 但没有调用",
+			response: llm.Response{
+				Message:      assistantTexture(""),
+				FinishReason: llm.FinishReason("tool_calls"),
+			},
+		},
+		{
+			name: "finish_reason=unknown",
+			response: llm.Response{
+				Message:      assistantTexture("未知结束"),
+				FinishReason: llm.FinishReason("unknown"),
+			},
+		},
+	}
+
+	for _, item := range cases {
+		t.Run(item.name, func(t *testing.T) {
+			manager := newManager()
+			base := timeoutBaseline()
+			seedSessionState(t, manager, base)
+
+			var logBuffer bytes.Buffer
+			provider := &scriptedProvider{script: []llm.Response{item.response}}
+			runner := newRealRunner(t, provider, manager, runlog.NewJSONSink(&logBuffer))
+			server := newTestServer(t, testConfig(""), httpapi.Deps{Sessions: manager, Runner: runner})
+
+			result := doRequest(t, server.Client(), http.MethodPost, server.URL+"/v1/chat", "application/json",
+				`{"session_id":"s-1","message":"结束语义异常"}`, "")
+			decodeError(t, result, http.StatusBadGateway, httpapi.CodeProviderFailure)
+
+			finished := lastRunFinished(t, &logBuffer)
+			if finished.Status != string(core.RunStatusFailed) || finished.ErrorKind != string(core.KindProviderFailure) {
+				t.Fatalf("run_finished = (status=%q,error_kind=%q)，期望 (FAILED,provider_failure)",
+					finished.Status, finished.ErrorKind)
+			}
+			assertSessionStateEqual(t, manager, base)
+		})
+	}
 }

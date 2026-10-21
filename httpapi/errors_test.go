@@ -109,7 +109,7 @@ func TestWriteErrorEnvelope(t *testing.T) {
 	}
 }
 
-// TestErrorCodeOf 核对错误分类优先级：会话哨兵 → ctx 终态 → core.KindOf → internal。
+// TestErrorCodeOf 核对错误分类优先级：会话哨兵 → 链中最外层 RunError.Kind → 裸 ctx 兜底 → internal。
 func TestErrorCodeOf(t *testing.T) {
 	ctx := context.Background()
 
