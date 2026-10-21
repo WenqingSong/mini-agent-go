@@ -8,7 +8,8 @@ resources:
   reservations: {}
 
 review:
-  status: NOT_REQUESTED
+  status: PENDING
+  target: "aad9dd4518c90445b32812f5f7174612790598a0"
 
 owner:
   status: PENDING
@@ -18,5 +19,5 @@ delivery:
 
 blocked:
   active: false
-  by: "TaskBuilder"
-  reason: "任务定义已完成，无定义层阻塞。执行前置：Owner 需创建本任务 feature branch（建议 feat/agent-real-llm-verification-v1，基线 f417327）；任何真实模型请求前需 Owner 明确给出 Model、最大上游请求次数、token/费用上限与是否允许一次真实负向测试。"
+  by: "Coder"
+  reason: "2026-10-21 前置条件已由 Owner 满足并解除：feature branch feat/agent-real-llm-verification-v1 已创建（基线 f417327），.env 已指向 TokenHub/deepseek-deepseek-flash，真实调用授权已给出（Provider=腾讯云 TokenHub，不设固定上限但仅限验收必需，允许 1 次真实负向请求）。Coder 据此完成 AC-001~AC-008 真实验收，共 4 次上游请求、1470 tokens，已停止调用；生产代码零改动。review.target=C1（证据提交），待 Cleaner 复审。"
