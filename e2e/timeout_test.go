@@ -43,8 +43,13 @@ func TestProviderUnresponsive(t *testing.T) {
 		t.Fatalf("Run 计数 = (llm=%d, tool=%d)，期望 (1, 0)", run.Outcome.LLMCalls, run.Outcome.ToolCalls)
 	}
 
-	exhausted, blocked, canceled := h.llm.stats()
-	if blocked != 1 || canceled != 1 || exhausted != 0 {
+	// 服务端观测是异步的：客户端先拿到结论时，脚本 goroutine 可能尚未记录上游取消。
+	// 按 Contract R4 用有界轮询等待观测成立，再断言完整三元组（观察项本身不删除、不弱化）。
+	waitFor(t, 2*time.Second, func() bool {
+		_, blocked, canceled := h.llm.stats()
+		return blocked == 1 && canceled == 1
+	}, "脚本服务观察到请求阻塞与上游取消")
+	if exhausted, blocked, canceled := h.llm.stats(); blocked != 1 || canceled != 1 || exhausted != 0 {
 		t.Fatalf("脚本观测 = (blocked=%d, canceled=%d, exhausted=%d)，期望 (1, 1, 0)", blocked, canceled, exhausted)
 	}
 	if got := h.llm.requestCount(); got != 1 {
@@ -76,8 +81,12 @@ func TestRequestTimeout(t *testing.T) {
 		t.Fatalf("Run LLMCalls = %d，期望 1（超时后不再发起调用）", run.Outcome.LLMCalls)
 	}
 
-	exhausted, blocked, canceled := h.llm.stats()
-	if blocked != 1 || canceled != 1 || exhausted != 0 {
+	// 同上：请求级超时先由客户端侧 ctx 到期产生结论，脚本侧取消观测可能稍后到达。
+	waitFor(t, 2*time.Second, func() bool {
+		_, blocked, canceled := h.llm.stats()
+		return blocked == 1 && canceled == 1
+	}, "脚本服务观察到请求阻塞与上游取消")
+	if exhausted, blocked, canceled := h.llm.stats(); blocked != 1 || canceled != 1 || exhausted != 0 {
 		t.Fatalf("脚本观测 = (blocked=%d, canceled=%d, exhausted=%d)，期望 (1, 1, 0)", blocked, canceled, exhausted)
 	}
 	if got := h.llm.requestCount(); got != 1 {
