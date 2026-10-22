@@ -9,7 +9,7 @@ import { ArrowUp, Check, Code2, Copy, Ellipsis, Menu, MessageCircle,
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { APIError, createSession, sendMessage } from './api'
-import { loadArchive, loadTheme, newChat, saveArchive, THEME_KEY, titleFrom } from './model'
+import { loadArchive, loadTheme, newChat, newId, saveArchive, THEME_KEY, titleFrom } from './model'
 import type { Archive, Chat, Message, Theme } from './model'
 
 function Logo({ small = false }: { small?: boolean }) {
@@ -100,10 +100,18 @@ export default function App() {
   }
   async function checkConnection(signal?: AbortSignal) {
     setConnection('checking')
+    // 健康检查本身要有超时：服务端接受连接却不再响应时，指示器不应永远停在“连接中”。
+    const request = new AbortController()
+    const abort = () => request.abort()
+    const timer = setTimeout(abort, 5000)
+    signal?.addEventListener('abort', abort, { once: true })
     try {
-      const result = await fetch('/api/healthz', { signal })
+      const result = await fetch('/api/healthz', { signal: request.signal })
       if (!signal?.aborted) setConnection(result.ok ? 'ready' : 'offline')
-    } catch { if (!signal?.aborted) setConnection('offline') }
+    } catch { if (!signal?.aborted) setConnection('offline') } finally {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', abort)
+    }
   }
   useEffect(() => {
     const controller = new AbortController()
@@ -126,6 +134,12 @@ export default function App() {
   useEffect(() => {
     scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: 'instant' })
   }, [archive.activeId, active?.messages])
+  // 等待回复期间输入框是 disabled 的，会丢失焦点；回复结束后把焦点还给输入框，连续追问不必每次点击。
+  const wasPending = useRef(false)
+  useEffect(() => {
+    if (wasPending.current && !pending) textarea.current?.focus()
+    wasPending.current = pending
+  }, [pending])
 
   async function submit(text = draft) {
     const content = text.trim()
@@ -134,17 +148,22 @@ export default function App() {
     const chat = current || newChat()
     const controller = new AbortController()
     requests.current.set(chat.id, controller)
-    const assistantId = crypto.randomUUID()
+    const assistantId = newId()
     const messages: Message[] = [
-      { id: crypto.randomUUID(), role: 'user', content, state: 'done' },
+      { id: newId(), role: 'user', content, state: 'done' },
       { id: assistantId, role: 'assistant', content: '', state: 'pending' },
     ]
     const updated = { ...chat, title: chat.messages.length ? chat.title : titleFrom(content), updatedAt: Date.now(), messages: [...chat.messages, ...messages] }
     change(value => ({ ...value, activeId: chat.id, chats: current ? value.chats.map(c => c.id === chat.id ? updated : c) : [updated, ...value.chats] }))
     setDrafts(value => ({ ...value, [current?.id || 'new']: '' }))
+    let sessionId = chat.sessionId
+    let chatRequestSent = false
     try {
-      const sessionId = chat.sessionId || await createSession(controller.signal)
-      patchChat(chat.id, value => ({ ...value, sessionId }))
+      if (!sessionId) {
+        sessionId = await createSession(controller.signal)
+        patchChat(chat.id, value => ({ ...value, sessionId }))
+      }
+      chatRequestSent = true
       const reply = await sendMessage(sessionId, content, controller.signal)
       patchChat(chat.id, value => ({ ...value, updatedAt: Date.now(), messages: value.messages.map(m => m.id === assistantId
         ? { ...m, content: reply.reply, state: 'done', llmCalls: reply.llm_calls, toolCalls: reply.tool_calls } : m) }))
@@ -152,11 +171,16 @@ export default function App() {
     } catch (error) {
       const code = error instanceof APIError ? error.code : 'network_error'
       const expired = code === 'session_not_found' || code === 'session_expired'
-      const uncertain = controller.signal.aborted || ['network_error', 'invalid_response', 'backend_unavailable'].includes(code)
+      // 只有「聊天请求已经发出、提交结果未知」才值得停止续聊：
+      // 主动停止时服务端整轮丢弃；会话还没创建成功时聊天请求根本没发出，重试是安全的。
+      const uncertain = !controller.signal.aborted && chatRequestSent
+        && ['network_error', 'invalid_response', 'backend_unavailable'].includes(code)
+      const message = controller.signal.aborted ? '已停止等待回复。'
+        : code === 'network_error' && !chatRequestSent ? '未能连接对话服务，请确认服务已启动后重试。'
+          : error instanceof APIError ? error.message : '连接中断，请稍后再试。'
       patchChat(chat.id, value => ({ ...value,
         unavailable: expired ? 'expired' : uncertain ? 'interrupted' : undefined,
-        messages: value.messages.map(m => m.id === assistantId ? { ...m, state: 'error', content: controller.signal.aborted
-          ? '已停止等待回复。' : error instanceof APIError ? error.message : '连接中断，请稍后再试。' } : m),
+        messages: value.messages.map(m => m.id === assistantId ? { ...m, state: 'error', content: message } : m),
       }))
       if (!controller.signal.aborted && (code === 'network_error' || code === 'backend_unavailable')) setConnection('offline')
     } finally { requests.current.delete(chat.id) }
@@ -187,7 +211,13 @@ export default function App() {
     <div className={`app ${sidebarOpen ? '' : 'sidebar-collapsed'}`}>
       <aside className="sidebar desktop-only">{sidebar()}</aside>
       <Dialog.Root open={mobileOpen} onOpenChange={setMobileOpen}><Dialog.Portal>
-        <Dialog.Overlay className="dialog-overlay" /><Dialog.Content className="mobile-sidebar sidebar">
+        <Dialog.Overlay className="dialog-overlay" /><Dialog.Content className="mobile-sidebar sidebar" onOpenAutoFocus={event => {
+          // 焦点放在对话框容器本身：自动聚焦首个按钮会立刻弹出它的 Tooltip，
+          // 而 Tooltip 属于更上层的可关闭层，会让第一次 Esc 只关掉提示、关不掉侧栏。
+          event.preventDefault()
+          const content = event.currentTarget as HTMLElement | null
+          content?.focus()
+        }}>
           <Dialog.Title className="sr-only">对话列表</Dialog.Title><Dialog.Description className="sr-only">选择、新建或删除本地对话。</Dialog.Description>{sidebar()}
         </Dialog.Content>
       </Dialog.Portal></Dialog.Root>

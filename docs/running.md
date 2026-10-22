@@ -20,7 +20,7 @@ docker pull docker.cnb.cool/arthur-cloud-native/jetbrains/goland:5.0.1
 
 这条命令只下载开发镜像。进入自行配置的开发容器后，还需要仓库源码、可用的 Docker daemon 与 Compose；CNB 的 `docker` 配套服务由平台提供。本仓库没有提供独立的本地 GoLand 容器编排文件，开发镜像的本地交互启动未在本次文档整理中验证。
 
-后端容器由仓库的 [Dockerfile](../Dockerfile) 构建：Go 1.24 编译阶段，Alpine 运行阶段，UID 10001 用户。前端容器由 [web/Dockerfile](../web/Dockerfile) 构建：Node.js 24 编译 React 页面，运行阶段保留静态产物和同源代理，以非 root 用户运行。`make up` 同时启动两个容器。
+应用镜像由仓库根 [Dockerfile](../Dockerfile) 三阶段构建：Node.js 24 阶段执行前端测试、类型检查并构建 React 静态资源；Go 1.24 阶段编译静态二进制；Alpine 运行阶段只保留二进制、`/app/web` 前端产物与 CA 证书，以 UID 10001 非 root 用户运行。`make up` 只启动这一个容器：页面、`/api` 与 `/v1` 由同一个进程在同一个端口提供。
 
 ## 本地容器操作
 
@@ -30,7 +30,7 @@ docker pull docker.cnb.cool/arthur-cloud-native/jetbrains/goland:5.0.1
 make init     # 检查 Docker/Compose，创建 .env，保留已有文件
 # 编辑 .env：填写模型根地址、模型 ID、模型密钥、HTTP 访问凭证
 make check    # 配置与环境预检查
-make up       # 构建、启动，等待 API 和网页就绪；网页 http://127.0.0.1:3000
+make up       # 构建、启动，等待网页与 API 就绪；应用 http://127.0.0.1:8080
 make ps       # 容器状态
 make logs     # JSON 日志，Ctrl-C 退出查看
 make down     # 停止并移除容器，保留 .env
@@ -40,7 +40,7 @@ make down     # 停止并移除容器，保留 .env
 
 `.env` 按模板使用单行 `KEY=value`，普通值不加引号。不要把 `.env` 当 shell 脚本执行。完整变量、默认值及适用条件见 [HTTP API 配置表](design/http-api.md#8-配置契约)。
 
-Compose 固定注入 `MINI_AGENT_LISTEN_ADDR=0.0.0.0:8080`，所以模板没有重复列出该项；宿主机端口只映射到 `127.0.0.1`。更换宿主机端口：
+Compose 固定注入 `MINI_AGENT_LISTEN_ADDR=0.0.0.0:8080`，所以模板没有重复列出该项；镜像内已设置 `MINI_AGENT_WEB_DIR=/app/web`，宿主机端口只映射到 `127.0.0.1`。更换宿主机端口：
 
 ```bash
 MINI_AGENT_HOST_PORT=9090 make up
@@ -49,7 +49,7 @@ curl -sS http://127.0.0.1:9090/healthz
 
 后续请求也应使用新端口。服务退出会清空内存中的会话，重启后需要重新创建。
 
-网页默认映射到 `127.0.0.1:3000`；用 `MINI_AGENT_WEB_PORT=3001 make up` 更换端口。页面通过前端容器的 `/api/` 代理访问后端；HTTP 凭证仅由代理读取，不写入浏览器构建文件。两个容器都只向宿主机回环地址发布端口，前端共用一份服务访问凭证，当前没有访客登录体系。
+页面与 API 共用 `MINI_AGENT_HOST_PORT`（默认 `127.0.0.1:8080`），没有第二个端口，也没有独立的前端容器。浏览器同源访问 `/api/healthz`、`/api/v1/sessions`、`/api/v1/chat`，凭证由 Go 进程在服务端注入：前端产物与浏览器都没有 `MINI_AGENT_AUTH_TOKEN`，模型 API Key 只存在于容器环境变量。`/v1` 端点仍要求 Bearer 凭证，`/api` 入口只接受同源写入请求；当前没有访客登录体系，端口仍只发布到宿主机回环地址。
 
 网页只在浏览器保存会话列表和消息。关闭容器不会删除浏览器中的记录；模型的会话上下文仍随后端退出而消失。浏览器存储不可用、服务会话失效、请求中断时，页面会给出对应提示。详见[前端说明](../web/README.md)。
 
@@ -89,17 +89,15 @@ BaseURL 应为兼容根地址，如 `https://host/v1`，客户端会追加 `/cha
 
 ## 构建、发布与仓库同步
 
-[Makefile](../Makefile) 的 `make ci` 检查 Go 业务模块；`make web-image` 通过前端 Dockerfile 执行测试、类型检查和构建，本机也可安装前端依赖后执行 `make web-check`。[`.cnb.yml`](../.cnb.yml) 的任意分支 push / PR 检查前后端；`main` push 检查通过后推送两个镜像。开发镜像与应用镜像地址不同：
+[Makefile](../Makefile) 的 `make ci` 检查 Go 业务模块；`make web-stage` 在 Node.js 24 容器内执行前端测试、类型检查和构建（只跑镜像的前端阶段），本机也可安装前端依赖后执行 `make web-check`。[`.cnb.yml`](../.cnb.yml) 的任意分支 push / PR 检查前后端；`develop` push 额外完整构建单镜像检查产物结构；`main` push 在检查、产物结构与容器冒烟全部通过后才推送唯一一个应用镜像（`latest` 与版本标签指向同一构建产物）。开发镜像与应用镜像地址不同：
 
 ```text
 开发环境：docker.cnb.cool/arthur-cloud-native/jetbrains/goland:5.0.1
 应用镜像：docker.cnb.cool/framework-station/mini-agent-go:latest
 版本标签：docker.cnb.cool/framework-station/mini-agent-go:v<VERSION>-<提交短SHA>
-前端镜像：docker.cnb.cool/framework-station/mini-agent-go:web-latest
-前端版本：docker.cnb.cool/framework-station/mini-agent-go:web-v<VERSION>-<提交短SHA>
 ```
 
-版本标签由 [VERSION](../VERSION) 与构建提交派生，便于追溯源码；可变基础镜像、重复构建和 Registry 权限仍会影响制品，源码中的命名规则本身不保证标签不可覆盖。需要精确锁定制品时使用实际镜像 digest。
+版本标签由 [VERSION](../VERSION) 与构建提交派生，便于追溯源码；`latest` 与版本标签由同一个本地镜像打标签后推送，不会重复构建出内容不同的制品。可变基础镜像、重复构建和 Registry 权限仍会影响制品，源码中的命名规则本身不保证标签不可覆盖。需要精确锁定制品时使用实际镜像 digest。
 
 CNB `main` 更新后会自动同步到 GitHub；同步由仓库侧另行配置，当前 `.cnb.yml` 只描述开发环境、检查与应用镜像发布。发布结果以 CNB 实际构建记录为准。
 

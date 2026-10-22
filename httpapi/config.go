@@ -35,6 +35,9 @@ type Config struct {
 	ShutdownGrace time.Duration
 	// MaxRequestBytes 是请求体读取上限，默认 DefaultMaxRequestBytes。
 	MaxRequestBytes int64
+	// WebDir 是前端静态产物目录（含 index.html 与 assets/）。为空表示只提供 API，
+	// 不提供页面；配置后同一个进程同时提供页面、同源 /api 与 /v1 路由。
+	WebDir string
 }
 
 // DefaultConfig 返回带默认值的配置。
@@ -104,8 +107,8 @@ func (c Config) GoString() string {
 func (c Config) describe() string {
 	cfg := c.withDefaults()
 	return fmt.Sprintf(
-		"httpapi.Config{listen_addr:%q auth_token:%s request_timeout:%s shutdown_grace:%s max_request_bytes:%d}",
-		cfg.ListenAddr, redacted(cfg.AuthToken), cfg.RequestTimeout, cfg.ShutdownGrace, cfg.MaxRequestBytes,
+		"httpapi.Config{listen_addr:%q auth_token:%s request_timeout:%s shutdown_grace:%s max_request_bytes:%d web_dir:%q}",
+		cfg.ListenAddr, redacted(cfg.AuthToken), cfg.RequestTimeout, cfg.ShutdownGrace, cfg.MaxRequestBytes, cfg.WebDir,
 	)
 }
 

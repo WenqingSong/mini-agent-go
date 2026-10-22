@@ -31,8 +31,10 @@ import (
 
 // 环境变量名：与 docs/design/http-api.md §8 的配置契约一致。
 const (
-	envListenAddr      = "MINI_AGENT_LISTEN_ADDR"
-	envAuthToken       = "MINI_AGENT_AUTH_TOKEN"
+	envListenAddr = "MINI_AGENT_LISTEN_ADDR"
+	envAuthToken  = "MINI_AGENT_AUTH_TOKEN"
+	// 前端静态产物目录：配置后同一个进程同时提供页面与 /api、/v1；未配置时只提供 API。
+	envWebDir          = "MINI_AGENT_WEB_DIR"
 	envLLMBaseURL      = "MINI_AGENT_LLM_BASE_URL"
 	envLLMAPIKey       = "MINI_AGENT_LLM_API_KEY"
 	envModel           = "MINI_AGENT_MODEL"
@@ -204,6 +206,7 @@ func loadConfig(getenv func(string) string) (httpapi.Config, service.Config, ope
 		httpConfig.ListenAddr = value
 	}
 	httpConfig.AuthToken = getenv(envAuthToken)
+	httpConfig.WebDir = strings.TrimSpace(getenv(envWebDir))
 
 	var err error
 	if httpConfig.RequestTimeout, err = positiveDurationEnv(getenv, envRequestTimeout, httpConfig.RequestTimeout); err != nil {

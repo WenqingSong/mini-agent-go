@@ -2,10 +2,14 @@
 #
 # 触发模型：
 #   * 任意分支 push / 任意目标分支的 PR → 检查 Go 与前端构建，不发布任何制品；
-#   * 仅 main 的 push → 检查通过后才构建并推送镜像；检查失败即中止，latest 不会被更新。
+#   * develop 的 push → 额外完整构建单镜像并做容器冒烟验收（只在本机构建，不推送）；
+#   * 仅 main 的 push → 检查与冒烟全部通过后才构建并推送唯一一个应用镜像。
 #
+# 发布物只有一个应用镜像（前端产物已在镜像内，由 Go 进程同源提供页面与 API）。
 # 镜像地址由 CNB 内置变量推导（CNB_DOCKER_REGISTRY + CNB_REPO_SLUG_LOWERCASE），
 # Fork 仓库自动推送到它自己的制品库，不会指向上游仓库。
+#
+# 说明：CNB → GitHub 的自动同步由仓库侧配置维护，本文件不包含、也不修改该机制。
 
 $:
   vscode:
@@ -34,11 +38,14 @@ $:
         volumes:
           - /go/pkg/mod
           - /root/.cache/go-build
+          - /root/.npm
       stages:
         - name: check
           script: make ci
+        # 前端在 Docker（Node.js 24）内执行测试、类型检查与生产构建：
+        # 前端失败会直接让本阶段失败，流水线不会继续。
         - name: frontend-check
-          script: make web-image
+          script: make web-stage
 
   push:
     - name: branch-ci
@@ -49,11 +56,12 @@ $:
         volumes:
           - /go/pkg/mod
           - /root/.cache/go-build
+          - /root/.npm
       stages:
         - name: check
           script: make ci
         - name: frontend-check
-          script: make web-image
+          script: make web-stage
 
 # main / develop 上的 PR：只检查，不发布（发布只由 main 的 push 触发）。
 "(main|develop)":
@@ -66,11 +74,12 @@ $:
         volumes:
           - /go/pkg/mod
           - /root/.cache/go-build
+          - /root/.npm
       stages:
         - name: check
           script: make ci
         - name: frontend-check
-          script: make web-image
+          script: make web-stage
 
 develop:
   push:
@@ -82,11 +91,22 @@ develop:
         volumes:
           - /go/pkg/mod
           - /root/.cache/go-build
+          - /root/.npm
       stages:
         - name: check
           script: make ci
-        - name: frontend-check
-          script: make web-image
+        # 集成分支就把完整镜像构建与容器冒烟跑一遍，避免问题只在 main 发布时才暴露。
+        - name: image-smoke
+          script: |
+            set -euo pipefail
+            docker build --pull -t mini-agent-go:ci .
+            docker run --rm --entrypoint /bin/sh mini-agent-go:ci -c '
+              test -f /app/web/index.html
+              test -n "$(ls /app/web/assets)"
+              test ! -e /app/.env
+              test ! -e /app/.git
+            '
+            echo "✓ develop 镜像构建与产物结构检查通过（未推送）"
 
 main:
   push:
@@ -98,11 +118,12 @@ main:
         volumes:
           - /go/pkg/mod
           - /root/.cache/go-build
+          - /root/.npm
       stages:
-        # 同一流水线内先检查再发布：任一检查失败都会中止后面的镜像构建与推送。
+        # 同一流水线内先检查再发布：任一检查或冒烟失败都会中止镜像构建与推送。
         - name: check
           script: make ci
-        - name: build-and-push-images
+        - name: build-verify-and-push
           script: |
             set -euo pipefail
 
@@ -111,35 +132,95 @@ main:
               echo "✗ VERSION 内容必须是 X.Y.Z，当前为 '${version}'" >&2
               exit 1
             fi
-            if [ -z "${CNB_COMMIT_SHORT:-}" ] || [ -z "${CNB_REPO_SLUG_LOWERCASE:-}" ]; then
-              echo "✗ 缺少 CNB 内置变量 CNB_COMMIT_SHORT / CNB_REPO_SLUG_LOWERCASE" >&2
-              exit 1
-            fi
+            for name in CNB_COMMIT CNB_COMMIT_SHORT CNB_REPO_SLUG_LOWERCASE CNB_DOCKER_REGISTRY; do
+              eval "value=\${${name}:-}"
+              if [ -z "${value}" ]; then
+                echo "✗ 缺少 CNB 内置变量 ${name}" >&2
+                exit 1
+              fi
+            done
 
             image="${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}"
             versioned="${image}:v${version}-${CNB_COMMIT_SHORT}"
-            web_versioned="${image}:web-v${version}-${CNB_COMMIT_SHORT}"
-            echo "镜像：${versioned} / ${web_versioned}（源码 ${CNB_COMMIT}）"
+            echo "单镜像发布：${versioned}（同时更新 ${image}:latest）"
+            echo "源码提交：${CNB_COMMIT}"
+
+            # 只构建一次：latest 由同一个镜像 tag 派生，两个标签必然指向同一制品。
+            docker build --pull \
+              --label "org.opencontainers.image.version=v${version}" \
+              --label "org.opencontainers.image.revision=${CNB_COMMIT}" \
+              -t "${versioned}" .
+
+            # 推送前先验收镜像内容与运行行为：不通过就不发布，避免半成品镜像。
+            docker run --rm --entrypoint /bin/sh "${versioned}" -c '
+              test -f /app/mini-agent
+              test -f /app/web/index.html
+              test -n "$(ls /app/web/assets)"
+              test ! -e /app/.env
+              test ! -e /app/.git
+              test ! -e /app/web/.env
+            '
+
+            smoke_name="mini-agent-smoke"
+            smoke_port=18080
+            smoke_token="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+            cleanup() { docker rm -f "${smoke_name}" >/dev/null 2>&1 || true; }
+            trap cleanup EXIT
+
+            # 冒烟容器只使用不可达的本地地址作为 Provider：不调用任何真实模型，也不打印凭证。
+            docker run -d --name "${smoke_name}" \
+              -p "127.0.0.1:${smoke_port}:8080" \
+              -e MINI_AGENT_LISTEN_ADDR=0.0.0.0:8080 \
+              -e MINI_AGENT_AUTH_TOKEN="${smoke_token}" \
+              -e MINI_AGENT_LLM_BASE_URL=http://127.0.0.1:9/v1 \
+              -e MINI_AGENT_MODEL=smoke-model \
+              -e MINI_AGENT_REQUEST_TIMEOUT=10s \
+              "${versioned}" >/dev/null
+
+            base="http://127.0.0.1:${smoke_port}"
+            ready=0
+            for _ in $(seq 1 60); do
+              if curl -fsS "${base}/healthz" >/dev/null 2>&1; then ready=1; break; fi
+              sleep 1
+            done
+            if [ "${ready}" -ne 1 ]; then
+              echo "✗ 容器未在 60 秒内就绪，日志：" >&2
+              docker logs "${smoke_name}" >&2 || true
+              exit 1
+            fi
+
+            status() { curl -sS -o /dev/null -w '%{http_code}' "$@"; }
+
+            test "$(curl -sS "${base}/healthz")" = '{"status":"ok"}'
+            test "$(status "${base}/")" = "200"
+            curl -sS "${base}/" | grep -q '<div id="root">'
+            test "$(status "${base}/api/healthz")" = "200"
+
+            session="$(curl -sS -X POST -H 'Content-Type: application/json' -d '{}' "${base}/api/v1/sessions" | sed -n 's/.*"session_id":"\([0-9a-f]*\)".*/\1/p')"
+            test -n "${session}"
+
+            # 未知 API 路径必须是 JSON 404，不能被 SPA fallback 变成页面。
+            test "$(status "${base}/v1/unknown")" = "404"
+            curl -sS "${base}/v1/unknown" | grep -q 'not_found'
+            # /v1 仍要求 Bearer 凭证：浏览器入口没有放宽原有认证。
+            test "$(status -X POST -H 'Content-Type: application/json' -d '{}' "${base}/v1/sessions")" = "401"
+            # 同源 /api 入口在服务端注入凭证，可用指向不可达地址的 Provider 走完协议链路。
+            test "$(status -X POST -H 'Content-Type: application/json' -d "{\"session_id\":\"${session}\",\"message\":\"hi\"}" "${base}/api/v1/chat")" = "502"
+
+            cleanup
+            trap - EXIT
+            echo "✓ 镜像冒烟验收通过（页面、静态资源、健康检查、会话与聊天链路）"
 
             printf '%s' "${CNB_TOKEN}" | docker login \
               --username "${CNB_TOKEN_USER_NAME}" \
               --password-stdin "${CNB_DOCKER_REGISTRY}"
 
-            # 只构建一次；latest 由同一镜像 tag 派生，保证两个标签指向同一制品。
-            docker build --pull -t "${versioned}" .
-            docker build --pull -t "${web_versioned}" web
-
-            # 两个镜像均在构建/测试完成后发布；凭证只在运行时注入。
-            for artifact in "${versioned}" "${web_versioned}"; do
-              docker run --rm --entrypoint /bin/sh "${artifact}" \
-                -c 'test ! -e /app/.env && test ! -e /app/.git'
-            done
-
+            # 同一个本地镜像打两个标签后推送，Registry 中两标签指向同一 digest。
             docker tag "${versioned}" "${image}:latest"
-            docker tag "${web_versioned}" "${image}:web-latest"
             docker push "${versioned}"
-            docker push "${web_versioned}"
             docker push "${image}:latest"
-            docker push "${image}:web-latest"
-            echo "✓ 已发布后端 ${versioned}"
-            echo "✓ 已发布前端 ${web_versioned}"
+
+            digest="$(docker image inspect --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}' "${versioned}")"
+            echo "✓ 已发布 ${versioned}"
+            echo "✓ 已发布 ${image}:latest"
+            echo "✓ 制品 digest：${digest:-未取得（以 Registry 记录为准）}"

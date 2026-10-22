@@ -23,8 +23,23 @@ export function emptyArchive(): Archive {
   return { version: 1, activeId: null, chats: [] }
 }
 
+// newId 生成本地标识。crypto.randomUUID 只在安全上下文（https / localhost）可用，
+// 通过局域网 IP 以 http 打开页面时并不存在；此时回退到 getRandomValues，
+// 避免点击发送直接抛错、页面看起来“按钮没反应”。
+export function newId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    const bytes = crypto.getRandomValues(new Uint8Array(16))
+    bytes[6] = (bytes[6] & 0x0f) | 0x40
+    bytes[8] = (bytes[8] & 0x3f) | 0x80
+    const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+  }
+  return `${Date.now().toString(16)}-${Math.random().toString(16).slice(2, 10)}`
+}
+
 export function newChat(): Chat {
-  return { id: crypto.randomUUID(), title: '新对话', updatedAt: Date.now(), messages: [] }
+  return { id: newId(), title: '新对话', updatedAt: Date.now(), messages: [] }
 }
 
 export function titleFrom(text: string): string {
