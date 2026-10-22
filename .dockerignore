@@ -10,11 +10,13 @@ bin
 .env
 .env.*
 .env.example
+.mini-agent-mode*
 
 # 与构建无关的仓库文件
 Dockerfile
 .dockerignore
 compose.yaml
+compose.*.yaml
 *.md
 docs
 

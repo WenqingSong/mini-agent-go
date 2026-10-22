@@ -7,6 +7,8 @@
 #  3. 校验口径与应用一致：变量名、BaseURL 协议、时长/整数格式都以
 #     cmd/mini-agent/main.go 与 httpapi/config.go 的真实实现为准。
 set -eu
+. scripts/common.sh
+read_mode
 
 if [ ! -f .env ]; then
   echo "✗ 未找到 .env：先执行 make init" >&2
@@ -14,7 +16,7 @@ if [ ! -f .env ]; then
 fi
 
 # value 读取单个键的值。不 source .env：值里的空格会被 shell 当成命令执行。
-# 语义与 Docker env_file 保持一致——引号属于值本身，同名键以最后一行为准。
+# 预检查按模板的单行 KEY=value 读取，同名键取最后一行；最终解析以 Compose 为准。
 value() {
   awk -v key="$1" '
     index($0, key "=") == 1 {
@@ -121,17 +123,9 @@ check_positive_int MINI_AGENT_MAX_TOOL_CALLS
 check_non_negative_int MINI_AGENT_CONTEXT_TOKEN_BUDGET
 check_non_negative_int MINI_AGENT_CONTEXT_KEEP_RECENT
 
-# make up 依赖 Docker Compose 与宿主机的 curl（轮询 /healthz）。
-if ! command -v docker >/dev/null 2>&1; then
-  report "未找到 docker" "安装 Docker 后重试（make up 用容器启动服务）"
-elif ! docker compose version >/dev/null 2>&1; then
-  report "docker compose 不可用" "安装 Docker Compose v2 插件（docker compose version 应能执行）"
-elif ! docker info >/dev/null 2>&1; then
-  report "Docker daemon 不可用" "启动 Docker Desktop，或把当前用户加入 docker 组后重新登录"
-fi
-
-if ! command -v curl >/dev/null 2>&1; then
-  report "未找到 curl" "make up 用 curl 轮询 /healthz，请先安装 curl"
+check_tools
+if ! docker_cmd info >/dev/null 2>&1; then
+  report "Docker daemon 不可用" "启动 Docker Desktop / Engine，或检查远端 daemon 与 Socket 访问权限"
 fi
 
 if [ "$bad" -ne 0 ]; then

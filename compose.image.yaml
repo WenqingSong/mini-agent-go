@@ -1,0 +1,5 @@
+services:
+  mini-agent:
+    image: docker.cnb.cool/framework-station/mini-agent-go:latest
+    # 当前发布物仅含 AMD64；Apple Silicon 的 Docker Desktop 需启用模拟支持。
+    platform: linux/amd64

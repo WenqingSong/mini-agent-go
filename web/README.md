@@ -32,7 +32,7 @@ React + TypeScript + Vite，Radix UI 提供菜单、对话框和提示组件，L
 
 ## 开发与检查
 
-本机需要 Node.js 24。先从仓库根目录 `make up` 启动应用容器，再启动 Vite；开发服务器会把 `/api` 代理到本机的 8080 端口（可用 `MINI_AGENT_DEV_BACKEND` 覆盖）：
+本机需要 Node.js 24。先从仓库根目录 `make init MODE=local` 选择源码构建，填好 `.env` 后 `make up` 启动应用容器，再启动 Vite；开发服务器会把 `/api` 代理到本机的 8080 端口（可用 `MINI_AGENT_DEV_BACKEND` 覆盖）：
 
 ```bash
 npm --prefix web ci

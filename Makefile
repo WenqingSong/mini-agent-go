@@ -14,7 +14,7 @@ IMAGE ?= mini-agent-go:local
 # 单镜像只发布一个端口：页面与 API 同源同端口。
 export MINI_AGENT_HOST_PORT ?= 8080
 APP_URL ?= http://127.0.0.1:$(MINI_AGENT_HOST_PORT)
-HEALTH_URL ?= $(APP_URL)/healthz
+export DOCKER COMPOSE APP_URL MODE
 
 .DEFAULT_GOAL := help
 .PHONY: help init check up down logs ps build test vet ci web-check web-stage image test-engine
@@ -22,57 +22,23 @@ HEALTH_URL ?= $(APP_URL)/healthz
 help: ## 显示命令说明
 	@awk 'BEGIN { FS = ":.*## " } /^[a-z][a-z-]*:.*## / { printf "  %-12s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
-init: ## 首次使用：检查 Docker、创建 .env（不启动服务、不调用模型）
-	@command -v $(DOCKER) >/dev/null 2>&1 || { echo "✗ 未找到 docker：make up 需要 Docker" >&2; exit 1; }
-	@$(COMPOSE) version >/dev/null 2>&1 || { echo "✗ docker compose 不可用：需要 Docker Compose v2" >&2; exit 1; }
-	@test -f .env.example || { echo "✗ 缺少 .env.example，仓库不完整" >&2; exit 1; }
-	@if [ -f .env ]; then \
-		echo "· .env 已存在，保留现有内容（不覆盖已有 API Key 等配置）"; \
-	else \
-		cp .env.example .env; \
-		echo "✓ 已根据 .env.example 创建 .env"; \
-	fi
-	@echo ""
-	@echo "下一步：编辑 .env，至少填写这 4 项"
-	@echo "  MINI_AGENT_LLM_BASE_URL   Provider 的 OpenAI 兼容根地址（含 /v1 等前缀）"
-	@echo "  MINI_AGENT_MODEL          该服务支持的模型名"
-	@echo "  MINI_AGENT_LLM_API_KEY    模型服务密钥"
-	@echo "  MINI_AGENT_AUTH_TOKEN     本服务对外 Bearer 凭证（openssl rand -hex 32 可生成）"
-	@echo ""
-	@echo "填完后执行：make check && make up"
+init: ## 初始化 .env 并选择启动模式（MODE=image / MODE=local）
+	@sh scripts/init.sh
 
-check: ## 校验 .env 与本地环境（不发任何模型请求）
+check: ## 校验启动模式、.env 与 Docker 环境（不调用模型）
 	@sh scripts/check-env.sh
 
-up: check ## 构建并启动单容器应用，等待网页与 API 就绪（不调用模型）
-	@$(COMPOSE) up -d --build
-	@printf '等待 %s 就绪' '$(APP_URL)'
-	@i=0; while [ $$i -lt 90 ]; do \
-		if curl -fsS '$(HEALTH_URL)' >/dev/null 2>&1 && \
-		   curl -fsS '$(APP_URL)/api/healthz' >/dev/null 2>&1 && \
-		   curl -fsS '$(APP_URL)/' | grep -q '<div id="root">'; then \
-			echo " ✓"; \
-			echo "网页与 API 已启动：$(APP_URL)"; \
-			echo "健康检查：$(HEALTH_URL)"; \
-			exit 0; \
-		fi; \
-		printf '.'; \
-		i=$$((i + 1)); \
-		sleep 1; \
-	done; \
-	echo " ✗"; \
-	echo "✗ 90 秒内应用未就绪，最近日志：" >&2; \
-	$(COMPOSE) logs --tail=50 >&2; \
-	exit 1
+up: ## 按已保存的模式拉取或构建镜像，启动并验证单容器应用
+	@sh scripts/up.sh
 
-down: ## 停止并移除容器（不删除 .env）
-	@$(COMPOSE) down
+down: ## 停止并移除容器（保留 .env 与启动模式）
+	@sh scripts/compose.sh down
 
 logs: ## 跟随查看服务日志
-	@$(COMPOSE) logs -f --tail=100
+	@sh scripts/compose.sh logs -f --tail=100
 
 ps: ## 查看容器状态与健康检查结果
-	@$(COMPOSE) ps
+	@sh scripts/compose.sh ps
 
 build: ## 本地构建可执行文件到 bin/mini-agent
 	@mkdir -p $(BIN_DIR)
