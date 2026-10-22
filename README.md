@@ -4,6 +4,8 @@
 
 **技术栈：** Go 1.24 / `net/http` / OpenAI-compatible API / `log/slog`。业务模块无第三方依赖，不依赖现成 Agent 框架。
 
+提供一个 React 对话页面，支持深浅色、多会话和本地聊天记录。前端与 Go API 分别运行在容器中。
+
 > 推荐访问 **[CNB 主仓库](https://cnb.cool/framework-station/mini-agent-go)**，获得代码阅读、云原生开发和构建记录的一体化体验。GitHub 为同步镜像，随 CNB `main` 更新自动同步。
 
 ## 当前能力
@@ -36,7 +38,7 @@ make init
 make up
 ```
 
-`make init` 创建 `.env`，已有文件会保留；`make up` 先检查配置，再构建应用镜像并启动服务。开发镜像的用途及本地准备方式见[运行指南](docs/running.md)。
+`make init` 创建 `.env`，已有文件会保留；`make up` 先检查配置，再构建前后端镜像并启动服务。开发镜像的用途及本地准备方式见[运行指南](docs/running.md)。
 
 ### 在本机运行
 
@@ -59,7 +61,11 @@ make up
 | `MINI_AGENT_LLM_API_KEY` | 模型服务密钥 |
 | `MINI_AGENT_AUTH_TOKEN` | 本服务的 HTTP 访问凭证，可用 `openssl rand -hex 32` 生成 |
 
-`.env` 不提交到 Git。容器端口映射到当前环境的 `127.0.0.1:8080`；在 CNB 中，下列请求也在云开发终端内执行。
+启动后在浏览器打开 **http://127.0.0.1:3000** 即可对话。在 CNB 云开发中，通过工作区的 3000 端口预览访问网页。点击“试试计算器”可演示一次工具调用，再追问“把刚才的结果加上 24”。
+
+聊天记录保存在当前浏览器的 `localStorage`，刷新可恢复；后端的模型上下文仍保存在内存中。后端重启后，旧记录可阅读，续聊时页面会提示新建会话。切换域名或端口会使用另一份本地记录。
+
+`.env` 不提交到 Git。API 端口仍映射到当前环境的 `127.0.0.1:8080`；下面是可选的命令行检查，在 CNB 中也应在云开发终端内执行。
 
 ```bash
 curl -sS http://127.0.0.1:8080/healthz
@@ -69,6 +75,9 @@ curl -sS http://127.0.0.1:8080/healthz
 健康检查只确认服务已启动，实际模型调用由下一步触发。首次构建需要拉取基础镜像；模型请求使用自己的 API Key，按服务商规则计费。
 
 ## 运行一次对话
+
+<details>
+<summary>展开命令行示例（也可直接使用上面的对话页面）</summary>
 
 以下命令在仓库根目录、同一个终端中依次执行。读取 `.env` 中的 HTTP 凭证，不输出其值；每次演示创建一个新会话。
 
@@ -108,6 +117,8 @@ curl -sS -X POST http://127.0.0.1:8080/v1/chat \
 make logs   # 查看 run_started / llm_request / tool_finished 等 JSON 事件
 make down   # 停止服务；内存会话随进程退出丢失
 ```
+
+</details>
 
 ## 核心设计
 
@@ -167,3 +178,4 @@ make ci   # build + vet + test + test -race
 | [HTTP API](docs/design/http-api.md) | 端点、字段、错误码及完整配置表 |
 | [测试与验收](docs/verification.md) | 可重复测试、真实调用证据及验证边界 |
 | [AI 辅助开发记录](docs/ai-assisted-development.md) | 提示词来源、实际问题、修复与验证依据 |
+| [前端说明](web/README.md) | 页面开发、浏览器存储、同源代理与前端测试 |
