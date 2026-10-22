@@ -288,6 +288,19 @@ func TestCompleteRequestConstruction(t *testing.T) {
 		}
 	})
 
+	t.Run("BaseURL 写成完整端点", func(t *testing.T) {
+		srv, requests := startCaptureServer(t, http.StatusOK, parseOKText)
+		client := testClient(t, srv.URL+"/v1/chat/completions", testAPIKey)
+
+		if _, err := client.Complete(context.Background(), minimalRequest()); err != nil {
+			t.Fatalf("不应返回错误：%v", err)
+		}
+		got := mustReceive(t, requests)
+		if got.path != "/v1/chat/completions" {
+			t.Fatalf("期望路径 /v1/chat/completions，实际 %s", got.path)
+		}
+	})
+
 	t.Run("工具失败结果以可区分文本回填", func(t *testing.T) {
 		srv, requests := startCaptureServer(t, http.StatusOK, parseOKText)
 		client := testClient(t, srv.URL, testAPIKey)
@@ -825,6 +838,19 @@ func TestNewClientConfigValidation(t *testing.T) {
 
 	t.Run("合法配置拼接端点", func(t *testing.T) {
 		for _, baseURL := range []string{"https://api.example.com/v1", "https://api.example.com/v1/", "https://api.example.com/v1//"} {
+			client, err := NewClient(Config{BaseURL: baseURL, APIKey: testAPIKey})
+			if err != nil {
+				t.Fatalf("BaseURL %q 不应失败：%v", baseURL, err)
+			}
+			if got, want := client.endpoint, "https://api.example.com/v1/chat/completions"; got != want {
+				t.Fatalf("BaseURL %q 期望端点 %q，实际 %q", baseURL, want, got)
+			}
+		}
+	})
+
+	t.Run("完整端点不重复拼接", func(t *testing.T) {
+		// Provider 文档通常直接给出完整端点；把它原样写进配置也必须可用。
+		for _, baseURL := range []string{"https://api.example.com/v1/chat/completions", "https://api.example.com/v1/chat/completions/"} {
 			client, err := NewClient(Config{BaseURL: baseURL, APIKey: testAPIKey})
 			if err != nil {
 				t.Fatalf("BaseURL %q 不应失败：%v", baseURL, err)

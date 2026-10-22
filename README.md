@@ -56,7 +56,7 @@ make up
 
 | `.env` 配置 | 填写内容 |
 | --- | --- |
-| `MINI_AGENT_LLM_BASE_URL` | 模型服务的兼容根地址，例如 `https://your-provider.example/v1`；不要带 `/chat/completions` |
+| `MINI_AGENT_LLM_BASE_URL` | 模型服务的兼容根地址，例如 `https://your-provider.example/v1`；Provider 文档给的是完整端点（`.../v1/chat/completions`）也可以直接填，客户端不会重复拼接 |
 | `MINI_AGENT_MODEL` | 服务商提供的模型 ID，需支持 Tool Calling |
 | `MINI_AGENT_LLM_API_KEY` | 模型服务密钥 |
 | `MINI_AGENT_AUTH_TOKEN` | 本服务的 HTTP 访问凭证，可用 `openssl rand -hex 32` 生成 |
