@@ -15,23 +15,18 @@
 
 ## 环境要求
 
-运行预构建镜像 `docker.cnb.cool/framework-station/mini-agent-go:latest`：
-
-- Git、GNU Make、curl
-- Docker Engine 或 Docker Desktop，包含 Compose v2
-- 可用的 Docker daemon，以及拉取镜像、访问模型服务的网络
-
-在本地用项目 Dockerfile 构建镜像：
-
-- 上述环境
-- 可访问 Docker Hub 与 npm registry，用于下载 Go / Node 基础镜像和前端依赖
-- 宿主机无需安装 Go 或 Node.js，版本由多阶段 Dockerfile 提供
-
-在宿主机直接修改、编译和调试源码：
-
-- Go 1.24+
-- Node.js 24 与 npm（仅前端开发和测试需要）
-- `go test -race` 需要 C 工具链
+- 运行预构建镜像 `docker.cnb.cool/framework-station/mini-agent-go:latest`
+  - Git、GNU Make、curl
+  - Docker Engine 或 Docker Desktop，包含 Compose v2
+  - 可用的 Docker daemon 与网络（拉取镜像、访问模型服务）
+- 用项目 Dockerfile 本地构建镜像
+  - 上述环境
+  - 可访问 Docker Hub 与 npm registry，用于下载 Go / Node 基础镜像和前端依赖
+  - 宿主机无需安装 Go 或 Node.js，版本由多阶段 Dockerfile 提供
+- 在宿主机直接修改、编译和调试源码
+  - Go 1.24+
+  - Node.js 24 与 npm（仅前端开发和测试需要）
+  - C 工具链（`go test -race` 需要）
 
 可选开发容器：`docker.cnb.cool/arthur-cloud-native/jetbrains/goland:5.0.1`。它是可选的开发环境镜像，不是本项目的应用镜像；在其中开发仍需自行确保 Docker daemon 可用。
 
@@ -40,7 +35,7 @@
 ## 快速开始
 
 ```bash
-git clone https://cnb.cool/framework-station/mini-agent-go.git
+git clone https://github.com/WenqingSong/mini-agent-go
 cd mini-agent-go
 
 make init
