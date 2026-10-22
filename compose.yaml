@@ -3,8 +3,7 @@
 # 配置全部来自 .env（env_file），镜像内不含任何凭据；会话保存在进程内存中，无额外依赖。
 services:
   mini-agent:
-    build:
-      context: .
+    # 镜像来源由 compose.image.yaml / compose.local.yaml 选择，运行配置共用。
     image: mini-agent-go:local
 
     env_file:

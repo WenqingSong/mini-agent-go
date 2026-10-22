@@ -1,6 +1,6 @@
 # 测试与验收
 
-本页说明可重复验证的行为与现有真实调用证据。功能入口以 [README](../README.md) 的“当前能力”为准；模块测试通过不代表该能力已接入默认 HTTP 服务。
+本页说明可重复验证的行为与现有真实调用证据。功能入口以 [README](../README.md) 的能力表为准；模块测试通过不代表该能力已接入默认 HTTP 服务。最新初始化、两种镜像来源与 curl 验证见[开发者体验交付报告](developer-onboarding-delivery.md)。
 
 ## 自动化验证
 
@@ -10,10 +10,11 @@
 make ci
 ```
 
-依次运行 `go build ./...`、`go vet ./...`、`go test -count=1 ./...`、`go test -race ./...`。根业务模块共 13 个测试包，不调用真实模型，不需要 API Key；HTTP 集成测试使用本机临时端口。
+依次运行 `go build ./...`、`go vet ./...`、`go test -count=1 ./...`、`go test -race ./...`。包含 13 个 Runtime 测试包及 `scripts` 初始化/启动流程测试包，不调用真实模型，不需要 API Key；HTTP 集成测试使用本机临时端口。
 
 | 场景 | 关键测试入口 | 检查内容 |
 | --- | --- | --- |
+| 初始化与启动流程 | [scripts/onboarding_test.go](../scripts/onboarding_test.go) | `.env` 保留、非交互模式、镜像来源不串用、失败非零退出；Healthy 但宿主机不可达时不报告成功 |
 | 普通回答与多步工具调用 | [agent/agent_test.go](../agent/agent_test.go)：`TestRunLoopsThroughToolsAcrossSteps`、`TestRunHandlesMultipleCallsInSingleResponse` | 循环、回填、调用计数与终态 |
 | 工具注册与参数校验 | [tool/registry_test.go](../tool/registry_test.go)、[tool/validate_test.go](../tool/validate_test.go) | 重复注册、Schema 子集、必填字段与类型 |
 | 内置工具 | [builtin](../builtin/) 下各工具测试 | 四则运算、固定数据集搜索、Todo 端口的会话作用域 |
@@ -228,7 +229,7 @@ run_finished (COMPLETED)
 ## 证据边界
 
 - 真实调用只留存文档中的响应与日志摘录，没有完整原始 JSONL，无法离线重放当时模型输出。
-- 真实验收没有覆盖搜索、Todo、压缩、压力测试或长期稳定性；首次计算后的语义追问也未单独验收。自动化测试验证了历史回填结构。
+- 上述 2026-10-21 记录没有覆盖搜索、Todo、压缩或语义追问；后续 2026-10-22 单镜像集成记录补充了搜索、Todo 与多轮真实调用。压缩使用模拟 Provider 验证，压力测试与长期稳定性仍不在这些证据范围内。
 - 单次调用耗时和 token 数只说明当次运行，不作为性能或质量指标。
 - 历史记录中关于“race 未进入 CI”的文字已过时：当前 `.cnb.yml` 调用 `make ci`，其中包含 race；是否在平台执行成功需查看实际构建记录。
 - 当前主文档按代码、测试与后续证据更新；`.agent/tasks/` 保留任务发生时的记录，不把历史阶段状态改写成新一次验收。

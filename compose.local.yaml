@@ -1,0 +1,5 @@
+services:
+  mini-agent:
+    image: mini-agent-go:local
+    build:
+      context: .
