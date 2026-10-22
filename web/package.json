@@ -8,6 +8,7 @@
     "build": "tsc -b && vite build",
     "start": "node server.mjs",
     "test": "tsx --test test/*.test.ts && node --test test/*.test.mjs",
+    "test:e2e": "node test/e2e/e2e.mjs",
     "check": "npm test && npm run build"
   },
   "dependencies": {
