@@ -8,7 +8,7 @@
 
 理解实现可以先读 §7 的提交与失败语义、§8 的会话并发模型、§9 的上下文策略。§11 保留关键不变量；§12 为维护者提供文件定位表。
 
-默认启动入口是 `cmd/mini-agent`：注册 `calculator`、使用内存 Session、关闭上下文压缩。`builtin` 另有模拟搜索和 Todo 工具，`contextmgr` 另有压缩逻辑；这些模块的存在不代表默认 HTTP 服务已经接入全部能力。
+默认启动入口是 `cmd/mini-agent`：经 `service.NewToolset` 注册五个内置工具（`calculator`、`mock_search`、`todo_create`、`todo_list`、`todo_complete`）、使用内存 Session、关闭上下文压缩。工具注册表按 Run 构造，Todo 工具绑定当次 Run 的 Session Turn（见 `service/todo.go`），因此写入与消息遵循同一事务边界。
 
 ## 2. 分层与依赖方向
 
@@ -62,7 +62,7 @@ go list -f '{{.ImportPath}} {{join .Imports " "}}' ./...
 | `runlog` | 运行事件模型、`Sink` 接口与结构化 JSON 记录（字段语义、脱敏与上限） | 文件落盘/滚动策略、采样、上报后端 |
 | `agent` | 一次 Run 的执行：装配参数与前置校验、上下文视图装配、LLM → Tool → LLM 循环驱动、双预算计数与触限、超时与取消中断、终态映射、整轮原子提交、运行事件接线 | Provider 与工具的具体实现、Todo 端口适配、生产 `Summarizer`、持久化、并行工具调度与性能优化、CLI / HTTP 入口 |
 | `httpapi` | HTTP 对外协议：配置与 fail-closed 校验、默认回环监听与 Bearer 认证、精确路由、有界请求读取与严格字段解析、错误码封闭枚举与 `code → status` 单点映射、请求超时、优雅关闭、`SessionStore` / `Runner` 端口定义 | 调用 Agent Loop、会话读写、Provider/工具装配、流式输出、TLS/CORS/限流/metrics、用户体系 |
-| `service` | HTTP 端口到 Agent Loop 的装配实现：一次真实 `RunTurn` 内的同 Turn 适配器、per-Run `Loop` 构造、用户消息构造、reply 提取、Run 结论到 `RunOutcome` 的映射 | HTTP 协议细节、会话实现、Todo 端口适配、生产 `Summarizer`、Provider 与工具的具体实现 |
+| `service` | HTTP 端口到 Agent Loop 的装配实现：一次真实 `RunTurn` 内的同 Turn 适配器、per-Run `Loop` 构造、per-Run 工具注册表（`tools.go`）、Turn 绑定的 Todo 端口适配（`todo.go`）、用户消息构造、reply 提取、Run 结论到 `RunOutcome` 的映射 | HTTP 协议细节、会话实现、生产 `Summarizer`、Provider 与工具的具体实现 |
 | `cmd/mini-agent` | 可启动入口：环境变量 → 配置与依赖装配（Provider、Registry、Session Manager、Context Manager、日志 Sink）→ 监听 → 终止信号 → 优雅关闭；fail-closed 占位 `Summarizer` | 业务逻辑、协议定义、部署与发布 |
 
 ## 4. 数据模型
@@ -163,7 +163,7 @@ RUNNING ──► COMPLETED        （模型不再要求工具调用）
 - 模型不得经 JSON 参数选择会话：`Arguments` 中出现 `session_id` / `sessionId` / `session` 一律 `invalid_arguments`。
 - Todo 工具不持有 Todo 状态副本、不生成 ID、不做读改写：`Create` / `List` / `Complete` 的会话作用域、ID 生成、状态迁移与幂等「完成」全部由注入的 `builtin.TodoOperations` 实现方完成；端口以 `builtin.ErrTodoNotFound` 表示「本会话不存在该待办」。
 - 失败分级：领域失败返回 `core.ToolResult{IsError: true}` 且 `error` 为 nil，内容为 `{"error":{"code","message"}}`；基础设施失败（端口返回非领域错误、`ctx` 已结束、端口未注入）返回 `*core.RunError`，原始错误只进 `Cause`，不得回显内部细节。
-- 后续服务装配需要把 `session.TodoOperations` 适配成 `builtin.TodoOperations`，并承担 Todo ID 生成与状态迁移；`builtin` 不 import `session` 的实现，`session` 也不 import `builtin`。
+- 生产适配位于 L3 装配层 `service/todo.go`：`turnTodoOperations` 把 `*session.Turn` 适配成 `builtin.TodoOperations`，只在 `RunTurn` 回调内构造并交给本次 Run 的注册表，因此绑定可信 SessionID、不重入 `Manager`；`builtin` 不 import `session` 的实现，`session` 也不 import `builtin`。
 
 ## 9. 上下文管理（contextmgr）
 
@@ -356,17 +356,21 @@ INV-017 来源：`session-turn-drop-leading-v1` 的 APPROVED `contract.md`（该
 | `httpapi/auth_test.go` | httpapi | 缺失/错误凭证一致性与零泄漏扫描 |
 | `httpapi/lifecycle_test.go` | httpapi | 就绪、关闭、宽限期、取消与超时穿透 |
 | `httpapi/fake_test.go` | httpapi | Fake `Runner`、捕获日志 Sink、会话快照辅助 |
-| `service/runner.go` | service | `Deps` / `Config` / `NewRunner` / `Run`（一次 `RunTurn` + `Append` + per-Run `Loop`） |
+| `service/runner.go` | service | `Deps` / `Config` / `NewRunner` / `Run`（一次 `RunTurn` + `Append` + per-Run 注册表与 `Loop`） |
 | `service/turn.go` | service | 同 Turn `agent.SessionRunner` 适配器、用户消息构造与 reply 提取 |
+| `service/tools.go` | service | `ToolsetFactory` / `NewToolset`：正式工具清单、per-Run 注册与封闭 |
+| `service/todo.go` | service | `turnTodoOperations`：`*session.Turn` → `builtin.TodoOperations`、Todo ID 生成、会话身份校验 |
 | `service/runner_test.go` | service | 真实 `agent.Loop` + Fake Provider/Tool + 真实 `session.Manager`：多轮、工具链路、无半轮、恰好一次 `RunTurn` |
+| `service/todo_test.go` | service | 正式注册表清单；Turn 绑定端口：创建/查询/完成、ID 唯一、跨会话拒绝、取消与 Turn 关闭、回滚；装配层 Todo 链路 |
 | `cmd/mini-agent/main.go` | cmd | 环境变量 → 装配 → 监听 → 终止信号 → 优雅关闭；可测入口 `run` |
-| `cmd/mini-agent/main_test.go` | cmd | 启动/就绪/非法配置 fail-closed/关闭幂等 |
+| `cmd/mini-agent/main_test.go` | cmd | 启动/就绪/非法配置 fail-closed/关闭幂等；正式装配工具清单与 Todo 链路 |
 | `e2e/harness_test.go` | 集成验收（仅测试） | 离线全链路装配：scripted OpenAI 兼容 loopback 服务、真实 `openai.Client` / `session.Manager` / `builtin` 工具、只读透传的 `recordingRunner`、`runlog` 事件捕获与断言辅助 |
 | `e2e/chat_test.go` | 集成验收（仅测试） | AC-001 单请求多工具连续执行；AC-002 同会话记忆与跨会话隔离（含 Session 预置 `Todos` / `Summary` 快照对比） |
 | `e2e/failure_test.go` | 集成验收（仅测试） | AC-003 可恢复工具失败回填继续；AC-004 provider 4xx/5xx、`MaxLLMCalls` / `MaxToolCalls` 耗尽与无半轮提交 |
 | `e2e/timeout_test.go` | 集成验收（仅测试） | AC-003 / AC-004 时间敏感用例：provider 无响应、HTTP 请求超时、客户端断开取消 |
 | `e2e/concurrency_test.go` | 集成验收（仅测试） | AC-006 HTTP 层并发：同会话并发、跨会话并发、并发工具调用，`-race` 干净 |
 | `e2e/offline_test.go` | 集成验收（仅测试） | AC-005 零真实 Token / 零外网的机械证据（源码扫描 + loopback 与请求计数断言） |
+| `e2e/todo_test.go` | 集成验收（仅测试） | Todo 端到端：创建/查询/完成、跨会话隔离与越权拒绝、失败/预算/超时回滚、非法调用与并发写入 |
 
 规则：
 
@@ -391,8 +395,8 @@ INV-017 来源：`session-turn-drop-leading-v1` 的 APPROVED `contract.md`（该
 | --- | --- |
 | 循环、预算与日志 | `agent` 单元测试及 HTTP 集成测试覆盖；真实计算器调用留有响应和 Trace 摘录 |
 | 会话并发与提交 | `session` / `service` / `e2e` 覆盖串行、隔离、取消及失败不提交；当前无跨实例保证 |
-| 内置工具 | 五个工具有模块测试；默认服务只注册计算器，E2E 额外注册模拟搜索 |
-| Todo 服务接入 | 尚无 `session.TodoOperations` 到 `builtin.TodoOperations` 的生产适配；未验证模型驱动的 Todo 端到端操作 |
+| 内置工具 | 五个工具有模块测试；默认服务经 `service.NewToolset` 全部注册，HTTP E2E 覆盖计算器、模拟搜索与 Todo 的模型驱动调用 |
+| Todo 服务接入 | `service/todo.go` 完成 `*session.Turn` → `builtin.TodoOperations` 适配；HTTP E2E 覆盖创建/查询/完成、跨会话隔离、越权拒绝与失败/预算/超时整轮回滚 |
 | 压缩 | `contextmgr` 和 `agent` 使用 Fake Summarizer 验证预算、配对和摘要提交；默认 HTTP 服务固定 `TokenBudget=0`，生产摘要器未接入 |
 | Token 估算 | 每条消息固定开销加 4 字符/token 的启发式估算；未对真实模型校准，也未覆盖工具 Schema 与输出预留 |
 | 存储 | 内存 Session，退出丢失；默认 TTL 为 0，无自动过期清理 |

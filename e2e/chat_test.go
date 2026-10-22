@@ -110,12 +110,16 @@ func TestMultiToolChainCommitsFullTurn(t *testing.T) {
 	if firstRequest.Model != e2eModel {
 		t.Fatalf("wire model = %q，期望 %q", firstRequest.Model, e2eModel)
 	}
-	if got := firstRequest.toolNames(); !reflect.DeepEqual(got, []string{"calculator", "mock_search"}) {
-		t.Fatalf("tools[] = %v，期望 [calculator mock_search]", got)
+	wantTools := []string{"calculator", "mock_search", "todo_complete", "todo_create", "todo_list"}
+	if got := firstRequest.toolNames(); !reflect.DeepEqual(got, wantTools) {
+		t.Fatalf("tools[] = %v，期望 %v（正式装配的完整工具清单）", got, wantTools)
 	}
 	for _, item := range firstRequest.Tools {
 		if len(item.Function.Parameters) == 0 || !json.Valid(item.Function.Parameters) {
 			t.Fatalf("工具 %q 的 parameters 不是合法 JSON Schema：%s", item.Function.Name, item.Function.Parameters)
+		}
+		if strings.TrimSpace(item.Function.Description) == "" {
+			t.Fatalf("工具 %q 缺少 description，模型无法判断何时调用", item.Function.Name)
 		}
 	}
 	if len(firstRequest.Messages) != 1 || firstRequest.Messages[0].Role != string(e2eRoleUser) {

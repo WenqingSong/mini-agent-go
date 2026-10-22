@@ -5,8 +5,9 @@
 // 再用「直接返回当前 Turn」的 agent.SessionRunner 构造 per-Run Loop。
 // 因此一次 chat 恰好一次真实 RunTurn：COMPLETED 整轮原子提交，其余终态整轮丢弃。
 //
-// 本包不实现 HTTP 协议、会话存储、Provider 与工具；Todo 端口适配、生产 Summarizer
-// 与 tokenizer 校准不属于本层（v1 只注册 calculator，TokenBudget 固定 0）。
+// 本包不实现 HTTP 协议、会话存储、Provider 与具体工具；它负责在每次 Run 内把工具注册表
+// 与「当前 Turn 的 Todo 能力」组装起来（见 tools.go / todo.go）。生产 Summarizer 与
+// tokenizer 校准不属于本层（v1 TokenBudget 固定 0）。
 package service
 
 import (
@@ -108,8 +109,8 @@ type Deps struct {
 	Provider llm.Provider
 	// Sessions 提供会话执行权与整轮原子提交，必填。
 	Sessions SessionRunner
-	// Registry 提供工具查找与元数据，必填；v1 只注册 calculator。
-	Registry tool.Registry
+	// Tools 构造本轮的工具注册表，必填；生产装配使用 NewToolset。
+	Tools ToolsetFactory
 	// Sink 接收运行事件；nil 时丢弃日志。Sink 失败不影响响应、Run 状态与计数。
 	Sink runlog.Sink
 	// Estimator 覆盖默认的上下文估算器；nil 时使用 HeuristicEstimator。
@@ -142,8 +143,8 @@ func NewRunner(deps Deps, cfg Config) (*Runner, error) {
 	if deps.Sessions == nil {
 		return nil, errors.New("service: Deps.Sessions 不能为 nil")
 	}
-	if deps.Registry == nil {
-		return nil, errors.New("service: Deps.Registry 不能为 nil")
+	if deps.Tools == nil {
+		return nil, errors.New("service: Deps.Tools 不能为 nil")
 	}
 	if deps.Sink == nil {
 		deps.Sink = runlog.Discard()
@@ -167,8 +168,11 @@ func NewRunner(deps Deps, cfg Config) (*Runner, error) {
 
 // Run 执行一次 chat 对应的 Agent Run。
 //
-// 装配语义：外层恰好一次真实 RunTurn → 回调内 Append 用户消息 → per-Run Loop
-// 复用当前 Turn → COMPLETED 提交，其余终态由回调返回非 nil 而整轮丢弃。
+// 装配语义：外层恰好一次真实 RunTurn → 回调内 Append 用户消息 → 用当前 Turn 构造
+// per-Run 工具注册表与 per-Run Loop → COMPLETED 提交，其余终态由回调返回非 nil 而整轮丢弃。
+//
+// 工具注册表在回调内构造，是因为 Todo 工具要通过 turnTodoOperations 绑定本次 Turn：
+// 它只存在于本次 Run 的 Loop 中，Run 结束后随注册表一起不可达。
 //
 // 返回值语义：Run 已形成结论时通过 RunOutcome 返回（含失败与取消），error 只用于
 // 「未形成 Run 结论」的会话/基础设施失败与「结论已完成但提交失败」。
@@ -182,7 +186,11 @@ func (r *Runner) Run(ctx context.Context, req httpapi.RunRequest) (httpapi.RunOu
 		if appendErr := turn.Append(userMessage(req.Message)); appendErr != nil {
 			return appendErr
 		}
-		loop, buildErr := agent.New(r.loopConfig(turn, req.SessionID))
+		registry, buildErr := r.deps.Tools(newTurnTodoOperations(turn, req.SessionID))
+		if buildErr != nil {
+			return buildErr
+		}
+		loop, buildErr := agent.New(r.loopConfig(turn, req.SessionID, registry))
 		if buildErr != nil {
 			return buildErr
 		}
@@ -207,12 +215,12 @@ func (r *Runner) Run(ctx context.Context, req httpapi.RunRequest) (httpapi.RunOu
 	return outcomeOf(result), nil
 }
 
-// loopConfig 构造 per-Run Loop 配置：会话能力指向当前 Turn，其余依赖由装配层透传。
-func (r *Runner) loopConfig(turn *session.Turn, sessionID string) agent.Config {
+// loopConfig 构造 per-Run Loop 配置：会话能力与工具注册表都指向当前 Turn，其余依赖由装配层透传。
+func (r *Runner) loopConfig(turn *session.Turn, sessionID string, registry tool.Registry) agent.Config {
 	return agent.Config{
 		Provider:     r.deps.Provider,
 		Sessions:     &turnSession{sessions: r.deps.Sessions, turn: turn, sessionID: sessionID},
-		Registry:     r.deps.Registry,
+		Registry:     registry,
 		Contexts:     r.contexts,
 		Sink:         r.deps.Sink,
 		SystemPrompt: r.cfg.SystemPrompt,

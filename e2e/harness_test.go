@@ -26,14 +26,12 @@ import (
 	"testing"
 	"time"
 
-	"cnb.cool/framework-station/mini-agent-go/builtin"
 	"cnb.cool/framework-station/mini-agent-go/core"
 	"cnb.cool/framework-station/mini-agent-go/httpapi"
 	"cnb.cool/framework-station/mini-agent-go/llm/openai"
 	"cnb.cool/framework-station/mini-agent-go/runlog"
 	"cnb.cool/framework-station/mini-agent-go/service"
 	"cnb.cool/framework-station/mini-agent-go/session"
-	"cnb.cool/framework-station/mini-agent-go/tool"
 )
 
 // 契约层枚举字面量：core 未导出 Role / ContentType 常量，包外只能做字面量转换。
@@ -462,7 +460,6 @@ type harness struct {
 	t *testing.T
 
 	sessions *session.Manager
-	registry *tool.MapRegistry
 	service  *service.Runner
 	recorder *recordingRunner
 	provider *openai.Client
@@ -487,23 +484,14 @@ func newHarness(t *testing.T, opts harnessOptions) *harness {
 		t.Fatalf("构造真实 openai.Client 失败：%v", err)
 	}
 
-	registry := tool.NewMapRegistry()
-	for _, impl := range []tool.Tool{builtin.NewCalculator(), builtin.NewMockSearch()} {
-		if err := registry.Register(impl); err != nil {
-			t.Fatalf("注册内置工具 %q 失败：%v", impl.Spec().Name, err)
-		}
-	}
-	if err := registry.Seal(); err != nil {
-		t.Fatalf("封闭工具注册表失败：%v", err)
-	}
-
 	sessions := session.NewManager(session.ManagerConfig{})
 	logs := &syncBuffer{}
 	runner, err := service.NewRunner(service.Deps{
 		Provider: provider,
 		Sessions: sessions,
-		Registry: registry,
-		Sink:     runlog.NewJSONSink(logs),
+		// 与正式入口同一个构造器：工具清单与 Todo 的 Turn 绑定方式都来自生产代码。
+		Tools: service.NewToolset,
+		Sink:  runlog.NewJSONSink(logs),
 	}, service.Config{
 		Model:        e2eModel,
 		MaxLLMCalls:  opts.maxLLMCalls,
@@ -532,7 +520,6 @@ func newHarness(t *testing.T, opts harnessOptions) *harness {
 	return &harness{
 		t:        t,
 		sessions: sessions,
-		registry: registry,
 		service:  runner,
 		recorder: recorder,
 		provider: provider,
