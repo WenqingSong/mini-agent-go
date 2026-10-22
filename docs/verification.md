@@ -54,9 +54,9 @@ Todo 的端到端链路（创建、查询、完成、跨会话隔离、失败/�
 
 ## 对话页面验证
 
-前端镜像的构建阶段运行 `npm run check`：4 个存储恢复测试、4 个 HTTP 代理测试、TypeScript 检查与生产构建。在 Node.js 24 容器内通过；Go 的 `make ci` 也通过。具体测试入口见 [web/README.md](../web/README.md)。
+前端阶段的构建运行 `npm run check`：浏览器存储恢复测试、TypeScript 检查与生产构建，在 Node.js 24 容器内通过；Go 的 `make ci` 也通过。同源代理的转发、凭证注入、跨站拒绝与路由隔离改由 Go 侧用例覆盖（`httpapi/webui_test.go`、`cmd/mini-agent/main_test.go`）。具体测试入口见 [web/README.md](../web/README.md)。
 
-本地使用独立 Compose 项目运行真实 Go API、前端容器和模拟模型，复核 `make up` 后通过浏览器验证：
+以下浏览器交互验证发生在双容器布局下（独立的 Node 前端容器），页面行为本身未变；当前布局改为单镜像单容器，页面与 `/api` 由同一个 Go 进程提供，见下节。当时的记录：
 
 - 工具计算返回 `1776`；刷新恢复记录后继续追问得到 `1800`，模拟模型检查了前一轮工具结果已进入下一轮上下文。
 - 新建和切换对话、Markdown 与代码块、深浅主题正常；390px 移动端侧栏可用，页面没有横向溢出。
@@ -64,6 +64,33 @@ Todo 的端到端链路（创建、查询、完成、跨会话隔离、失败/�
 - 重启后端，再向旧 Session 发送消息时，页面保留旧记录并显示会话失效提示。
 
 这些结果验证页面与真实运行时的连接，以及异常时的交互；模型输出由本地脚本控制，没有重新验证真实模型质量，也没有执行 CNB 远端构建或镜像推送。
+
+## 单镜像与 CNB 流水线（本地验证）
+
+2026-10-22，Linux amd64、Go 1.24.1、Node.js 24（容器内）、Docker 29.6.2，在被验证分支上本地执行，未触发 CNB 发布：
+
+| 项目 | 结果 |
+| --- | --- |
+| `docker build .` | 通过；三阶段（Node 24 前端产物 → Go 24 静态二进制 → Alpine），前端 `npm run check` 在镜像构建内通过 |
+| 镜像内容 | 7,039,693 字节 / 5 层；`/app/mini-agent` + `/app/web/{index.html,assets,favicon.svg}`；无 Node 运行时、无 `.env`、无 `.git` |
+| 单容器启动 | `docker run` 与 `docker compose up -d` 均只产生 1 个应用容器、1 个端口 |
+| `GET /` | 200 `text/html; charset=utf-8`，`Cache-Control: no-cache`，含 CSP / `nosniff` / `Referrer-Policy` |
+| `GET /assets/index-*.js`、`*.css` | 200 `text/javascript` / `text/css`，`Cache-Control: public, max-age=31536000, immutable` |
+| `GET /healthz`、`/api/healthz` | 200 `{"status":"ok"}` |
+| `POST /api/v1/sessions`、`POST /api/v1/chat` | 201 / 200 `COMPLETED`，模拟 Provider 收到 `Authorization`（凭证由进程注入，浏览器未持有） |
+| `POST /v1/sessions` | 无凭证 401，带凭证 201（同源入口没有放宽 `/v1` 认证） |
+| 路由隔离 | `/v1/unknown`、`/api/unknown`、`/v1`、`/api` → 404 JSON；`GET /v1/sessions` → 405 + `Allow: POST` |
+| 路径安全 | `/.env`、`/../go.mod`、`/%2e%2e%2f.env`、`/assets/../../go.mod`、缺失静态资源 → 404 |
+| 跨站写入 | `Origin: https://evil.example` 与 `Sec-Fetch-Site: cross-site` → 403 `forbidden_origin`，未触达 Runner |
+| 配置 fail-closed | 缺 `MINI_AGENT_MODEL`、非回环缺 `MINI_AGENT_AUTH_TOKEN`、`MINI_AGENT_WEB_DIR` 不存在 → 进程退出码 1 并输出明确原因 |
+| 停止 | `docker stop` 后退出码 0，约 0.4s；容器日志为 JSON 事件，不含 HTTP 凭证或模型 Key |
+| 回归 | `go build ./...`、`go vet ./...`、`go test -count=1 ./...`、`go test -race ./...`、`make ci`、`make web-stage` 均通过 |
+
+证据边界：
+
+- 聊天链路使用本机模拟 Provider（固定返回文本），不调用付费模型，也不验证模型质量。
+- `.cnb.yml` 的发布只在 `main` push 触发；本次未推送 `main`，因此**没有**远端镜像构建与推送结果，不声称已发布。
+- 镜像标签与 digest 规则由流水线脚本定义，实际 Registry 制品以 CNB 构建记录为准。
 
 ## 既有真实模型验收
 

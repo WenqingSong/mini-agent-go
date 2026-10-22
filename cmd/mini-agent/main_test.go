@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -858,6 +859,103 @@ func TestRunCompactsWithConfiguredBudgetEnv(t *testing.T) {
 	}
 	if !strings.Contains(lastText, "早期对话摘要") {
 		t.Fatalf("压缩后未召回摘要：%s", lastText)
+	}
+
+	signals <- os.Interrupt
+	select {
+	case err := <-results:
+		if err != nil {
+			t.Fatalf("优雅关闭返回错误：%v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("收到终止信号后未在限定时间内退出")
+	}
+	scanForSecrets(t, "运行日志", logs.String())
+}
+
+// TestRunServesFrontendAndBrowserAPI 核对正式装配下同一个进程同时提供页面、静态资源与同源 /api。
+//
+// 这条用例覆盖最终运行镜像的形态：一个端口、一个进程、不需要第二个前端服务。
+func TestRunServesFrontendAndBrowserAPI(t *testing.T) {
+	llmServer, llmCalls := fakeOpenAI(t, "同源页面回答")
+
+	webDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(webDir, "assets"), 0o755); err != nil {
+		t.Fatalf("创建静态资源目录失败：%v", err)
+	}
+	indexHTML := `<!doctype html><html><body><div id="root"></div><script type="module" src="/assets/app-abc123.js"></script></body></html>`
+	if err := os.WriteFile(filepath.Join(webDir, "index.html"), []byte(indexHTML), 0o644); err != nil {
+		t.Fatalf("写入 index.html 失败：%v", err)
+	}
+	if err := os.WriteFile(filepath.Join(webDir, "assets", "app-abc123.js"), []byte("console.log('ok')"), 0o644); err != nil {
+		t.Fatalf("写入前端脚本失败：%v", err)
+	}
+
+	logs := &syncBuffer{}
+	baseURL, signals, results, _ := startRun(t, map[string]string{
+		"MINI_AGENT_LISTEN_ADDR":  "127.0.0.1:0",
+		"MINI_AGENT_AUTH_TOKEN":   fakeAuthToken,
+		"MINI_AGENT_LLM_BASE_URL": llmServer.URL,
+		"MINI_AGENT_LLM_API_KEY":  fakeLLMAPIKey,
+		"MINI_AGENT_MODEL":        "test-model",
+		"MINI_AGENT_WEB_DIR":      webDir,
+	}, logs)
+
+	status, body, header := httpJSON(t, http.MethodGet, baseURL+"/", "", "")
+	if status != http.StatusOK || !strings.Contains(string(body), `<div id="root">`) {
+		t.Fatalf("GET / = (%d,%s)，期望返回 index.html", status, body)
+	}
+	if contentType := header.Get("Content-Type"); !strings.HasPrefix(contentType, "text/html") {
+		t.Fatalf("GET / Content-Type = %q，期望 text/html", contentType)
+	}
+	scanForSecrets(t, "页面响应体", string(body))
+	scanForSecrets(t, "页面响应头", headerText(header))
+
+	status, _, header = httpJSON(t, http.MethodGet, baseURL+"/assets/app-abc123.js", "", "")
+	if status != http.StatusOK || !strings.HasPrefix(header.Get("Content-Type"), "text/javascript") {
+		t.Fatalf("GET 静态脚本 = (%d,%q)，期望 200 text/javascript", status, header.Get("Content-Type"))
+	}
+
+	// 页面路由刷新不会 404。
+	status, body, _ = httpJSON(t, http.MethodGet, baseURL+"/chats/abc", "", "")
+	if status != http.StatusOK || !strings.Contains(string(body), `<div id="root">`) {
+		t.Fatalf("GET /chats/abc = (%d,%s)，期望 SPA fallback", status, body)
+	}
+
+	// 浏览器不持有凭证：同源 /api 由进程注入凭证后复用 /v1 处理器。
+	status, body, _ = httpJSON(t, http.MethodPost, baseURL+"/api/v1/sessions", "{}", "")
+	if status != http.StatusCreated {
+		t.Fatalf("POST /api/v1/sessions = (%d,%s)，期望 201", status, body)
+	}
+	var created struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.Unmarshal(body, &created); err != nil {
+		t.Fatalf("创建会话响应不是合法 JSON：%v", err)
+	}
+
+	chatBody := fmt.Sprintf(`{"session_id":%q,"message":"你好"}`, created.SessionID)
+	status, body, _ = httpJSON(t, http.MethodPost, baseURL+"/api/v1/chat", chatBody, "")
+	if status != http.StatusOK {
+		t.Fatalf("POST /api/v1/chat = (%d,%s)，期望 200", status, body)
+	}
+	if !strings.Contains(string(body), "同源页面回答") || llmCalls() != 1 {
+		t.Fatalf("同源 chat 未走完真实 Run：body=%s provider 调用=%d", body, llmCalls())
+	}
+
+	// /v1 仍要求 Bearer 凭证：同源入口没有放宽原有认证。
+	status, body, _ = httpJSON(t, http.MethodPost, baseURL+"/v1/sessions", "{}", "")
+	if status != http.StatusUnauthorized {
+		t.Fatalf("无凭证 POST /v1/sessions = (%d,%s)，期望 401", status, body)
+	}
+
+	// 未知 API 路径返回 JSON 404，不返回页面。
+	status, body, header = httpJSON(t, http.MethodGet, baseURL+"/v1/unknown", "", "")
+	if status != http.StatusNotFound || !strings.Contains(string(body), "not_found") {
+		t.Fatalf("GET /v1/unknown = (%d,%s)，期望 JSON 404", status, body)
+	}
+	if strings.HasPrefix(header.Get("Content-Type"), "text/html") {
+		t.Fatal("/v1/unknown 被 SPA fallback 截获")
 	}
 
 	signals <- os.Interrupt

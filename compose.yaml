@@ -1,5 +1,6 @@
-# 本地编排：Go API 与 React 前端各一个容器。浏览器记录存本地，无额外数据库。
-# 配置全部来自 .env（env_file），镜像内不含任何凭据。
+# 本地编排：一个应用容器同时提供页面与 API（前端产物已打进镜像），
+# 浏览器同源访问 /api/*，无需单独启动前端容器、也不存在跨域配置。
+# 配置全部来自 .env（env_file），镜像内不含任何凭据；会话保存在进程内存中，无额外依赖。
 services:
   mini-agent:
     build:
@@ -21,20 +22,4 @@ services:
     # 留出余量，避免 docker stop 在应用完成在途请求前就 SIGKILL。
     stop_grace_period: 15s
 
-    restart: unless-stopped
-
-  web:
-    build:
-      context: ./web
-    image: mini-agent-web:local
-    environment:
-      MINI_AGENT_BACKEND_URL: http://mini-agent:8080
-      # 仅服务端代理读取；前端构建与浏览器均不接触此凭证或模型 API Key。
-      MINI_AGENT_AUTH_TOKEN: ${MINI_AGENT_AUTH_TOKEN:?请先在 .env 中配置 HTTP 凭证}
-    ports:
-      - "127.0.0.1:${MINI_AGENT_WEB_PORT:-3000}:3000"
-    depends_on:
-      mini-agent:
-        condition: service_healthy
-    stop_grace_period: 15s
     restart: unless-stopped

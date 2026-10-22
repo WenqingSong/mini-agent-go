@@ -4,7 +4,7 @@
 
 **技术栈：** Go 1.24 / `net/http` / OpenAI-compatible API / `log/slog`。业务模块无第三方依赖，不依赖现成 Agent 框架。
 
-提供一个 React 对话页面，支持深浅色、多会话和本地聊天记录。前端与 Go API 分别运行在容器中。
+提供一个 React 对话页面，支持深浅色、多会话和本地聊天记录。页面与 API 由**同一个进程、同一个端口**提供：前端产物已打进运行镜像，浏览器同源访问 `/api`，无需第二个前端服务，也不需要跨域配置。
 
 > 推荐访问 **[CNB 主仓库](https://cnb.cool/framework-station/mini-agent-go)**，获得代码阅读、云原生开发和构建记录的一体化体验。GitHub 为同步镜像，随 CNB `main` 更新自动同步。
 
@@ -38,7 +38,7 @@ make init
 make up
 ```
 
-`make init` 创建 `.env`，已有文件会保留；`make up` 先检查配置，再构建前后端镜像并启动服务。开发镜像的用途及本地准备方式见[运行指南](docs/running.md)。
+`make init` 创建 `.env`，已有文件会保留；`make up` 先检查配置，再构建**一个**应用镜像（构建阶段同时产出前端静态资源与 Go 二进制）并启动**一个**容器。开发镜像的用途及本地准备方式见[运行指南](docs/running.md)。
 
 ### 在本机运行
 
@@ -61,11 +61,11 @@ make up
 | `MINI_AGENT_LLM_API_KEY` | 模型服务密钥 |
 | `MINI_AGENT_AUTH_TOKEN` | 本服务的 HTTP 访问凭证，可用 `openssl rand -hex 32` 生成 |
 
-启动后在浏览器打开 **http://127.0.0.1:3000** 即可对话。在 CNB 云开发中，通过工作区的 3000 端口预览访问网页。点击“试试计算器”可演示一次工具调用，再追问“把刚才的结果加上 24”。
+启动后在浏览器打开 **http://127.0.0.1:8080** 即可对话（页面与 API 同一端口）。在 CNB 云开发中，通过工作区的 8080 端口预览访问网页。点击“试试计算器”可演示一次工具调用，再追问“把刚才的结果加上 24”。
 
 聊天记录保存在当前浏览器的 `localStorage`，刷新可恢复；后端的模型上下文仍保存在内存中。后端重启后，旧记录可阅读，续聊时页面会提示新建会话。切换域名或端口会使用另一份本地记录。
 
-`.env` 不提交到 Git。API 端口仍映射到当前环境的 `127.0.0.1:8080`；下面是可选的命令行检查，在 CNB 中也应在云开发终端内执行。
+`.env` 不提交到 Git，也不会进入镜像。端口只映射到当前环境的 `127.0.0.1:8080`，应用强制要求 `MINI_AGENT_AUTH_TOKEN`；下面是可选的命令行检查，在 CNB 中也应在云开发终端内执行。
 
 ```bash
 curl -sS http://127.0.0.1:8080/healthz
@@ -73,6 +73,21 @@ curl -sS http://127.0.0.1:8080/healthz
 ```
 
 健康检查只确认服务已启动，实际模型调用由下一步触发。首次构建需要拉取基础镜像；模型请求使用自己的 API Key，按服务商规则计费。
+
+### 用已发布的应用镜像启动
+
+流水线在 `main` 上发布唯一的应用镜像，标签为 `v<VERSION>-<提交短SHA>` 与 `latest`，两者指向同一个构建产物。只拉取一个镜像、只启动一个容器即可同时使用页面与 Agent API：
+
+```bash
+docker run -d --name mini-agent -p 127.0.0.1:8080:8080 \
+  -e MINI_AGENT_LLM_BASE_URL='https://your-provider.example/v1' \
+  -e MINI_AGENT_MODEL='your-tool-calling-model' \
+  -e MINI_AGENT_LLM_API_KEY='your-provider-key' \
+  -e MINI_AGENT_AUTH_TOKEN='your-http-token' \
+  docker.cnb.cool/framework-station/mini-agent-go:latest
+```
+
+浏览器打开 `http://127.0.0.1:8080` 即是完整应用。缺少 `MINI_AGENT_LLM_BASE_URL` 或 `MINI_AGENT_MODEL` 时进程会明确报错退出；容器内监听非回环地址时缺少 `MINI_AGENT_AUTH_TOKEN` 同样会拒绝启动。
 
 ## 运行一次对话
 

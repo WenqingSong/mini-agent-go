@@ -97,6 +97,26 @@ type RunOutcome struct {
 
 所有路由错误响应（含 404/405）都使用 §4 的 JSON 错误封套。
 
+### 3.5 页面与同源 `/api` 入口（配置 `WebDir` 时）
+
+配置 `MINI_AGENT_WEB_DIR` 后，同一个进程在同一个端口同时提供页面、同源代理入口与 `/v1` API：
+
+| 路径 | 行为 |
+| --- | --- |
+| `/` | 返回静态目录中的 `index.html` |
+| 无扩展名的未知路径 | SPA fallback 返回 `index.html`（刷新与直接访问页面路由不会 404） |
+| `/assets/*` | 内容哈希静态资源，`Cache-Control: public, max-age=31536000, immutable` |
+| 其余静态文件 | 按扩展名返回 MIME，`Cache-Control: no-cache` |
+| `/api/healthz` | `GET`，等价于 `/healthz` |
+| `/api/v1/sessions`、`/api/v1/chat` | `POST`，等价于同名 `/v1` 端点 |
+| 未登记的 `/api/*`、`/v1/*` | `404 not_found`（JSON），不回落 `index.html` |
+
+- **入口是固定映射**：只有表中登记的 `/api` 路径可达，`/api` 不复用通配转发，因此不会成为任意路径的上游代理。
+- **凭证在服务端注入**：`/api` 处理器复用 `/v1` 处理器，请求进入前由进程把 `MINI_AGENT_AUTH_TOKEN` 写入 `Authorization`；浏览器与前端产物都不持有凭证，`/v1` 仍要求 Bearer 凭证（`401` 语义不变）。
+- **写入入口要求同源**：`POST /api/*` 在 `Sec-Fetch-Site: cross-site` 时返回 `403 forbidden_origin`；无 Fetch Metadata 的旧浏览器回退比较 `Origin` 与 `Host`。跨站写入在解析 body、调用 Runner 之前即被拒绝。
+- **静态路径只读**：仅 `GET`/`HEAD`；路径先归一化且拒绝 `..` 段，越界与隐藏文件请求返回 `404`，不存在任意文件读取。
+- **启动 fail-closed**：`WebDir` 不存在、不是目录或缺少 `index.html` 时构造失败，不会静默退化为「只有 API」的半成品服务。
+
 ## 4. 错误封套与错误码域
 
 封套固定：
@@ -118,6 +138,7 @@ type RunOutcome struct {
 | `unauthorized` | 401 | 凭证缺失或错误（同一 code、同一响应） |
 | `not_found` | 404 | 未知路径 |
 | `method_not_allowed` | 405 | 已知路径方法不符 |
+| `forbidden_origin` | 403 | 同源 `/api` 写入入口收到跨站请求 |
 | `session_not_found` | 404 | `errors.Is(err, session.ErrSessionNotFound)` |
 | `session_expired` | 404 | `errors.Is(err, session.ErrSessionExpired)` |
 | `session_exists` | 409 | `errors.Is(err, session.ErrSessionExists)` |
@@ -193,6 +214,7 @@ type RunOutcome struct {
 | `MINI_AGENT_TOOL_TIMEOUT` | 否 | `30s` | 工具级超时，`<= 0` 表示不设 |
 | `MINI_AGENT_CONTEXT_TOKEN_BUDGET` | 否 | `0` | 上下文估算预算；`0` 表示禁用压缩，必须为非负整数 |
 | `MINI_AGENT_CONTEXT_KEEP_RECENT` | 否 | `8` | 压缩时保留的近期消息条数下限；必须为非负整数，`0` 视为未配置 |
+| `MINI_AGENT_WEB_DIR` | 否 | 空 | 前端静态产物目录；应用镜像设为 `/app/web`。为空表示只提供 API，不提供页面 |
 
 - 配置结构必须实现脱敏 `String()`：`%v` / `%+v` / `%#v` 都不输出明文凭证，输出 `<redacted>` / `<unset>`。
 - 运行日志只经 `runlog.Sink` 记录，Sink 失败不得改变响应、Run 状态或计数。
