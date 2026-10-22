@@ -34,6 +34,9 @@ type Server struct {
 
 	http *http.Server
 
+	// web 提供前端静态资源；为 nil 时本进程只提供 API（不提供页面）。
+	web *webUI
+
 	mu       sync.Mutex
 	listener net.Listener
 	inflight int
@@ -57,12 +60,18 @@ func New(cfg Config, deps Deps) (*Server, error) {
 		return nil, errors.New("httpapi: Deps.Runner 不能为 nil")
 	}
 
+	web, err := newWebUI(normalized.WebDir)
+	if err != nil {
+		return nil, err
+	}
+
 	baseCtx, cancel := context.WithCancel(context.Background())
 	s := &Server{
 		cfg:     normalized,
 		deps:    deps,
 		baseCtx: baseCtx,
 		cancel:  cancel,
+		web:     web,
 	}
 	s.http = &http.Server{
 		// 单入口分派：不使用会做路径清理与重定向的默认 ServeMux 语义。
@@ -112,33 +121,62 @@ func (s *Server) Addr() string {
 	return s.listener.Addr().String()
 }
 
-// ServeHTTP 按「方法 + 精确路径」分派三个端点；所有响应（含 404/405）都是 JSON 封套。
+// ServeHTTP 是唯一入口，分派顺序固定：
+//
+//  1. /api/* 同源代理入口（仅在配置了前端静态目录时存在）；
+//  2. /v1/* 与 /healthz 三个 API 端点（方法 + 精确路径）；
+//  3. 其余路径：静态资源 / SPA fallback。
+//
+// API 分派先于静态资源，保证前端页面路由不会截获 API；未命中的 /v1、/api 路径
+// 返回 JSON 404，绝不回落到 index.html。所有 API 响应（含 404/405）都是 JSON 封套。
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	release := s.beginRequest()
 	defer release()
 
+	if browserRouteTarget(r.URL.Path) != "" {
+		s.serveBrowserAPI(w, r)
+		return
+	}
+	if s.serveAPI(w, r) {
+		return
+	}
+	// 未知 API 路径：保持协议语义（JSON 404），不进入 SPA fallback。
+	if isAPIPath(r.URL.Path) {
+		writeError(w, CodeNotFound)
+		return
+	}
+	if s.web == nil {
+		writeError(w, CodeNotFound)
+		return
+	}
+	s.web.serveHTTP(w, r)
+}
+
+// serveAPI 按「方法 + 精确路径」分派三个公开端点；命中返回 true。
+func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) bool {
 	switch r.URL.Path {
 	case "/v1/sessions":
 		if r.Method != http.MethodPost {
 			methodNotAllowed(w, http.MethodPost)
-			return
+			return true
 		}
 		s.handleCreateSession(w, r)
 	case "/v1/chat":
 		if r.Method != http.MethodPost {
 			methodNotAllowed(w, http.MethodPost)
-			return
+			return true
 		}
 		s.handleChat(w, r)
 	case "/healthz":
 		if r.Method != http.MethodGet {
 			methodNotAllowed(w, http.MethodGet)
-			return
+			return true
 		}
 		s.handleHealthz(w, r)
 	default:
-		writeError(w, CodeNotFound)
+		return false
 	}
+	return true
 }
 
 // Shutdown 优雅关闭：停止接受新连接并在 ctx 内等待在途请求完成。

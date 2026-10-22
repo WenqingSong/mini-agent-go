@@ -8,17 +8,16 @@ ENGINE_DIR ?= .agent/engine
 BIN_DIR ?= bin
 BINARY ?= $(BIN_DIR)/mini-agent
 IMAGE ?= mini-agent-go:local
-WEB_IMAGE ?= mini-agent-web:local
 
 # 宿主机回环端口：只绑定 127.0.0.1，容器内部固定监听 0.0.0.0:8080。
 # 导出后 compose.yaml 的 ${MINI_AGENT_HOST_PORT} 与下面的健康检查使用同一个值。
+# 单镜像只发布一个端口：页面与 API 同源同端口。
 export MINI_AGENT_HOST_PORT ?= 8080
-export MINI_AGENT_WEB_PORT ?= 3000
-HEALTH_URL ?= http://127.0.0.1:$(MINI_AGENT_HOST_PORT)/healthz
-WEB_URL ?= http://127.0.0.1:$(MINI_AGENT_WEB_PORT)
+APP_URL ?= http://127.0.0.1:$(MINI_AGENT_HOST_PORT)
+HEALTH_URL ?= $(APP_URL)/healthz
 
 .DEFAULT_GOAL := help
-.PHONY: help init check up down logs ps build test vet ci web-check web-image image test-engine
+.PHONY: help init check up down logs ps build test vet ci web-check web-stage image test-engine
 
 help: ## 显示命令说明
 	@awk 'BEGIN { FS = ":.*## " } /^[a-z][a-z-]*:.*## / { printf "  %-12s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -45,16 +44,16 @@ init: ## 首次使用：检查 Docker、创建 .env（不启动服务、不调�
 check: ## 校验 .env 与本地环境（不发任何模型请求）
 	@sh scripts/check-env.sh
 
-up: check ## 构建并启动前后端，等待网页与 API 就绪（不调用模型）
+up: check ## 构建并启动单容器应用，等待网页与 API 就绪（不调用模型）
 	@$(COMPOSE) up -d --build
-	@printf '等待 %s 就绪' '$(HEALTH_URL)'
-	@i=0; while [ $$i -lt 30 ]; do \
+	@printf '等待 %s 就绪' '$(APP_URL)'
+	@i=0; while [ $$i -lt 90 ]; do \
 		if curl -fsS '$(HEALTH_URL)' >/dev/null 2>&1 && \
-		   curl -fsS '$(WEB_URL)/' >/dev/null 2>&1 && \
-		   curl -fsS '$(WEB_URL)/api/healthz' >/dev/null 2>&1; then \
+		   curl -fsS '$(APP_URL)/api/healthz' >/dev/null 2>&1 && \
+		   curl -fsS '$(APP_URL)/' | grep -q '<div id="root">'; then \
 			echo " ✓"; \
-			echo "网页已启动：$(WEB_URL)"; \
-			echo "API 健康检查：$(HEALTH_URL)"; \
+			echo "网页与 API 已启动：$(APP_URL)"; \
+			echo "健康检查：$(HEALTH_URL)"; \
 			exit 0; \
 		fi; \
 		printf '.'; \
@@ -62,7 +61,7 @@ up: check ## 构建并启动前后端，等待网页与 API 就绪（不调用�
 		sleep 1; \
 	done; \
 	echo " ✗"; \
-	echo "✗ 30 秒内前后端未就绪，最近日志：" >&2; \
+	echo "✗ 90 秒内应用未就绪，最近日志：" >&2; \
 	$(COMPOSE) logs --tail=50 >&2; \
 	exit 1
 
@@ -95,10 +94,10 @@ ci: ## CI 同款全量检查：build + vet + test + race
 web-check: ## 前端测试、类型检查与构建（本机需 Node.js 24；先 npm --prefix web ci）
 	npm --prefix web run check
 
-web-image: ## 构建前端镜像；构建阶段包含前端测试和类型检查
-	$(DOCKER) build -t $(WEB_IMAGE) web
+web-stage: ## 在 Node.js 24 容器内执行前端测试、类型检查与构建（只跑前端阶段）
+	$(DOCKER) build --target web -t mini-agent-web-build:local .
 
-image: ## 本地构建 Docker 镜像（不做健康检查）
+image: ## 本地构建单镜像（Go 后端 + 前端产物；构建内含前端测试与类型检查）
 	$(DOCKER) build -t $(IMAGE) .
 
 # .agent/engine 是独立 Module，必须单独测试，避免被根模块 ./... 吞掉或反向关联

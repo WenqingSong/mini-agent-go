@@ -1,4 +1,6 @@
-# 构建上下文只保留编译 Go 代码必需的内容。
+# 构建上下文只保留构建 Go 与前端产物必需的内容。
+
+# 版本控制与本地工具链目录
 .git
 .gitignore
 .agent
@@ -9,10 +11,14 @@ bin
 .env.*
 .env.example
 
-# 与运行无关的仓库文件
+# 与构建无关的仓库文件
 Dockerfile
 .dockerignore
 compose.yaml
 *.md
 docs
-web
+
+# 前端本地产物与依赖：镜像内由 npm ci 重新安装、vite build 重新生成
+web/node_modules
+web/dist
+web/*.tsbuildinfo
