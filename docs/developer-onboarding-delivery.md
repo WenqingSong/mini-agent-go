@@ -1,19 +1,17 @@
 # 开发者初始化与交付记录
 
-本次从 `develop` 的 `ee60a12` 开始，在 `docs/developer-onboarding-v1` 实施。按用户最终要求停止后续测试，提交并推送该独立分支；不修改 `develop`、`main`、VERSION 或 GitHub 同步机制。
+本分支从 `develop` 的 `ee60a12` 起在 `docs/developer-onboarding-v1` 实施，统一入口为 `make init → 编辑 .env → make up`。两种模式均在真实 Docker 中完成启动验收；未修改 Agent Loop、Session Manager、Tool Executor、Context Manager、Dockerfile、VERSION 与发布流水线。
 
 ## 改动
 
 | 文件 | 内容 |
 | --- | --- |
 | `Makefile`、`scripts/init.sh`、`scripts/common.sh` | 统一初始化入口，简短菜单与非交互 `MODE=image/local`，保存模式；已有 `.env` 不覆盖 |
-| `scripts/up.sh`、`scripts/compose.sh`、`scripts/check-env.sh` | 按模式启动、配置检查、容器与宿主机健康/页面检查；保留 down、logs、ps |
+| `scripts/up.sh`、`scripts/compose.sh`、`scripts/check-env.sh` | 按模式拉取或构建、启动、配置检查、容器与宿主机健康/页面检查；保留 down、logs、ps |
 | `compose.yaml`、`compose.image.yaml`、`compose.local.yaml` | 共享单容器配置，仅区分镜像来源；容器监听固定为 `0.0.0.0:8080`，宿主机默认仅映射 `127.0.0.1:8080` |
 | `.env.example`、`.gitignore`、`.dockerignore` | 必填配置置顶；忽略密钥文件与本地模式文件，避免进入构建上下文 |
 | `README.md`、`docs/running.md`、`docs/verification.md`、`web/README.md` | 重组入口与运行说明，保留架构、Memory、已有测试和 AI 开发记录 |
 | `scripts/onboarding_test.go` | 最小离线测试，覆盖初始化保护、模式分支和启动失败路径 |
-
-README 按项目简介、代码托管、环境准备、快速开始、HTTP API / curl、系统设计与 Memory、测试与 AI 辅助开发、其他命令组织。Agent Runtime、前端 UI、Dockerfile 和发布流水线未改动。
 
 ## 使用方式
 
@@ -26,38 +24,39 @@ README 按项目简介、代码托管、环境准备、快速开始、HTTP API /
 - **image**：先拉取 `docker.cnb.cool/framework-station/mini-agent-go:latest`，再以 `--no-build --pull never` 启动。当前发布镜像为 AMD64，编排显式指定 `linux/amd64`。
 - **local**：先按根 Dockerfile 构建 React 与 Go 的完整应用镜像，再以同样参数启动；不启动额外 Node 服务。
 
-两种模式的启动后检查均要求容器运行且健康、宿主机 `/healthz` 成功、首页含 React 挂载节点；失败返回非零退出码。默认就绪等待为 90 秒，不包含拉取/构建耗时。成功输出访问地址、curl 入口与 Bearer 占位符，不打印凭证。
+启动检查要求容器运行且健康、宿主机 `/healthz` 成功、首页含 React 挂载节点；任一不满足即非零退出并指出失败项。默认就绪等待为 90 秒，不包含拉取/构建耗时。成功输出只打印地址与命令，不含任何凭证。
 
 ## 配置与安全
 
-`.env.example` 默认 BaseURL 为 `https://tokenhub.tencentmaas.com/v1`，Model 为 `deepseek/deepseek-flash`，两类凭证均为替换占位符。保留原有可选默认值：请求超时 60s、关闭宽限 10s、请求上限 1 MiB、模型与工具调用预算各 8、工具超时 30s、Context 预算 0、近期消息下限 8，以及原系统提示词和静态目录说明。
+`.env.example` 默认 BaseURL 为 `https://tokenhub.tencentmaas.com/v1`，Model 为 `deepseek/deepseek-flash`，两类凭证均为替换占位符。必填区之后留空，再列可选默认值：请求超时 60s、关闭宽限 10s、请求上限 1 MiB、模型与工具调用预算各 8、工具超时 30s、Context 预算 0、近期消息下限 8，以及原系统提示词和静态目录说明。
 
-首次创建 `.env` 使用限制性权限；已有文件不覆盖。`.env` 和模式文件均被 Git 与 Docker 构建上下文忽略。容器监听由 Compose 明确注入，不改变 Go 程序直接启动时默认监听回环地址的行为。README 使用 Bash 隐藏输入设置 HTTP Token，不执行或 `source .env`。
+首次创建 `.env` 使用 0600 权限；已有文件逐字保留。`.env` 与模式文件均被 Git 和 Docker 构建上下文忽略。容器监听由 Compose 明确注入，Go 程序直接运行时仍默认监听回环地址。README 用 Bash 隐藏输入设置 HTTP Token，不执行或 `source .env`，也不要求把凭证写入 Shell 配置文件。
 
-## 已完成的验证及边界
+## 验收结果
 
-以下结果发生在用户要求停止测试之前；停止后未继续测试，也没有调用真实付费模型。
+2026-10-22 在本机 Docker（Engine 29.6.2、Compose v5.3.1、linux/amd64）实际执行，端口为默认 `127.0.0.1:8080`。模型调用使用本机离线 mock Provider（OpenAI 兼容、含 calculator 工具调用），**未调用真实付费模型**。
 
 | 项目 | 结果 |
 | --- | --- |
-| `make ci` | 通过：Go build、vet、单元/离线 E2E 与 race；随后新增的页面不可达失败用例通过 scripts 包定向测试 |
-| 初始化 | 实际交互默认选 image、重跑切换 local；已有 `.env` 内容保持一致。离线测试覆盖非交互参数、非法模式与首次创建 |
-| Compose 配置 | 两种模式均只有一个应用服务、默认回环端口映射、固定容器监听；仅 local 包含 build 配置 |
-| 预构建模式 | 实际拉取并成功启动；无本地构建，单容器健康，页面、静态资源、健康接口可访问 |
-| README curl | 使用本地模拟 Provider，按 README 的 Bash 示例创建 Session、计算得到 1776、同会话追问得到 1800；两次回复均为 COMPLETED。未认证创建 Session 返回 401 |
-| 配置注入与凭证 | 模拟 Provider 收到预期模型与认证信息；前端产物未发现测试凭证，成功提示无凭证；初始化及启动过程没有模型调用 |
-| 容器监听回归 | 验证时故意将 `.env` 设置为回环监听，实际容器仍由 Compose 覆盖为 `0.0.0.0:8080`，宿主机访问成功 |
-| 本地构建模式 | 已实现并通过离线模式选择测试；实际 Docker 构建未完成，按用户要求停止，**未验证完整启动结果** |
-| 前端及远端流水线 | 本次未重新完成浏览器测试、前端构建检查或远端 CNB 流水线验收；历史证据仍见 `docs/verification.md` |
-
-实际容器验证使用回环端口 **18080**，因为本机 8080 已被其他服务占用；README curl 仅替换端口，默认 8080 映射另经 Compose 配置检查确认。验证的已发布镜像 ID 为 `sha256:a243e468cc6a09ab7f982308f7bbf26b78a1b842e008af57208bf80f9117b2bd`，镜像版本标签为 `v0.1.0`、源码 revision 为 `0322094a6ccea064335a3e8efba46cbf0a3518d1`。`latest` 后续可能更新。
+| `make ci` | 通过：`go build`、`go vet`、单元/离线 E2E 与 `-race`，含 `scripts` 初始化与启动流程测试 |
+| 首次初始化 | 全新技术预览（`git archive` 解包）中 `make init MODE=local` 由模板创建 `.env`，权限 600 且与 `.env.example` 一致，模式文件写入 `local` |
+| 交互初始化 | TTY 下直接回车保存 `image`，输入 `2` 保存 `local`；两次执行后 `.env` 字节不变 |
+| 非交互与非法输入 | 无 TTY 且未给 `MODE` 时提示 `MODE=image` / `MODE=local` 并非零退出；非法模式不创建任何文件 |
+| 占位符保护 | 未填凭证时 `make up` 以非零状态退出，逐项指出仍为占位符的变量，不启动容器 |
+| 预构建模式 | `make init MODE=image` + `make up` 实际拉取 `latest`（镜像 ID `sha256:a243e468…`，标注版本 `v0.1.0`、源码 revision `0322094a`）并启动；单容器 healthy，`127.0.0.1:8080->8080/tcp`，首页 200 且含 `<div id="root">`，`/healthz` 返回 `{"status":"ok"}` |
+| 本地构建模式 | `make init MODE=local` + `make up` 用当前源码经 Dockerfile 前端与 Go 阶段构建 `mini-agent-go:local`（`sha256:22a214b7…`）并启动；上述页面、健康检查与端口结论一致 |
+| 容器监听回归 | `.env` 故意写入 `MINI_AGENT_LISTEN_ADDR=127.0.0.1:8080`，容器内实际为 `0.0.0.0:8080`（Compose 覆盖生效），宿主机访问正常；不再出现 Healthy 但 Connection Reset |
+| README curl | 两种模式下按 README 的 Bash 示例创建 Session、计算 `37*48` 得 `1776`（`llm_calls=2`、`tool_calls=1`），同会话追问加 24 得 `1800`，两次均为 `COMPLETED`；未带 Bearer 创建 Session / 调用 chat 返回 401 |
+| 凭证注入 | mock Provider 收到的模型名与 `Authorization` 与 `.env` 一致；`make init` / `make up` 未发起模型请求；初始化与启动输出、前端产物均未出现测试凭证 |
+| 其他命令 | 真实 Docker 下 `make ps` 显示容器与健康状态，`make down` 移除容器与网络且保留 `.env` 与模式文件 |
+| 容器数量 | 两种模式均为单个应用容器，页面与 API 同端口，无额外前端容器 |
 
 ## 环境前提与剩余限制
 
-- 首次使用仍需可访问的 Docker daemon、Compose、Make、curl，以及有效模型服务配置。启动检查验证应用可访问，不验证模型凭证有效性。
+- 首次使用需要可访问的 Docker daemon、Compose v2、Make、curl，以及有效模型服务配置。启动检查验证应用可访问，不验证模型凭证有效性。
 - 当前发布镜像只有 AMD64；Apple Silicon 需要 Docker 的 AMD64 模拟支持，或选择本地构建。
-- 可选 GoLand 开发镜像不是应用镜像。本次未拉取或启动该开发镜像；自行使用时必须另外确认 Docker CLI、Compose、daemon / Socket 与端口访问位置，不能仅凭拉取镜像认定 DinD 可用。
-- 已验证的预构建路径未发现阻止使用的问题；本地完整构建与启动仍未经本次验收，不能声称两个模式都已实际通过。
+- 可选 GoLand 开发镜像是开发环境镜像，不是应用镜像。本次未拉取或启动该镜像；自行使用时必须另外确认 Docker CLI、Compose、daemon / Socket 与端口访问位置。
 - Session 仍为服务端内存状态，重启后丢失；浏览器本地记录不能恢复服务端上下文。
+- 本轮只做交付流程验收：未重新执行浏览器 E2E、前端单测与远端流水线，其历史证据见[测试与验收](verification.md)；未调用真实模型，语义质量证据同样以既有记录为准。
 
-最终提交及远端 SHA 以本次交付回复为准。本分支推送不等于正式镜像发布。
+本分支推送不等于正式镜像发布；`main` 的 push 才会构建并发布镜像。

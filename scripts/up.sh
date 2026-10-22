@@ -46,18 +46,18 @@ mini-agent-go started successfully.
 Web UI:
   $app_url
 
-Health Check:
+Health:
   curl $app_url/healthz
 
 Backend API:
   POST /v1/sessions
   POST /v1/chat
-  Authorization: Bearer <your-token>
+  Requires Bearer authentication.
 
-API examples:
-  See README.md — HTTP API / curl
+Curl examples:
+  See README.md
 
-Commands:
+Other:
   make logs
   make down
 EOF

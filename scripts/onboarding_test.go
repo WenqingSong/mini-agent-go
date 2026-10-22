@@ -146,7 +146,7 @@ func TestImageModePullsWithoutBuildingAndLocalBuildsWithoutPulling(t *testing.T)
 			f.configured(mode)
 			out := f.run(true, "up")
 			log := f.read("commands")
-			if !strings.Contains(out, "started successfully") || !strings.Contains(out, "http://127.0.0.1:8080") || !strings.Contains(out, "Authorization: Bearer <your-token>") {
+			if !strings.Contains(out, "started successfully") || !strings.Contains(out, "http://127.0.0.1:8080") || !strings.Contains(out, "Requires Bearer authentication.") || !strings.Contains(out, "Curl examples:") {
 				t.Fatal("missing startup guidance")
 			}
 			for _, secret := range []string{"test-provider-secret", "test-http-secret"} {
