@@ -1,115 +1,110 @@
 # mini-agent-go
 
-从零实现的 Go Agent Runtime，核心执行循环不依赖现成 Agent 框架。模型通过 OpenAI-compatible Chat Completions / Tool Calling 决定回答或调用工具；运行时负责校验、执行、回填结果、继续循环与提交会话状态。
+从零实现的 Go Agent Runtime，核心执行循环不依赖任何现成 Agent 框架。模型通过 OpenAI-compatible Chat Completions / Tool Calling 自主决定直接回答还是调用工具，运行时负责工具注册、参数校验、执行、结果回填、多轮循环与 Session 状态管理。
 
-**技术栈：** Go 1.24 / `net/http` / `log/slog` / React + TypeScript。Go 业务模块仅依赖标准库。React 静态页面与 Go 后端打包成**一个应用镜像**，由同一个 Go 进程、同一个端口提供服务。
+技术栈：Go 1.24（业务模块仅使用标准库）、React + TypeScript + Vite。前端静态产物由同一个 Go 进程同源提供，前后端打包为一个镜像、监听一个端口。
 
 | 能力 | 当前实现 |
 | --- | --- |
-| Agent Loop | 直接回答、多步工具调用；单次响应可包含多个工具调用，按顺序执行 |
-| 工具 | `calculator`、`mock_search`、`todo_create`、`todo_list`、`todo_complete` 均已接入正式启动入口；搜索使用固定数据集 |
-| Session | 同会话多轮对话与串行执行、跨会话隔离与并发；状态仅保存在内存 |
-| Context | 历史与工具结果回填、估算预算、近期窗口、规则化有损摘要；压缩默认关闭 |
-| 运行保护 | 模型/工具调用预算、超时与取消、失败整轮回滚、关联 Session / Run / Tool Call 的 JSON 日志 |
-| 对话页面 | 深浅主题、多会话、浏览器本地记录、Markdown；完整回答返回后显示，无流式输出 |
+| Agent Loop | 直接回答与多步工具调用；单次响应可包含多个工具调用，按顺序执行 |
+| 工具 | `calculator`、`mock_search`（固定数据集）、`todo_create` / `todo_list` / `todo_complete` |
+| Session | 同会话串行、跨会话隔离与并发；状态仅保存在进程内存 |
+| Context | 估算 Token 预算、近期窗口、规则化有损摘要；压缩默认关闭 |
+| 运行保护 | 模型与工具调用预算、超时与取消、失败整轮回滚、按 Session / Run / Tool Call 关联的 JSON 日志 |
+| Web UI | 多会话对话页、Markdown 渲染、深浅主题；完整回答返回后展示，不支持流式输出 |
 
-## 代码托管与开发方式
+## 环境要求
 
-推荐访问 **[CNB 主仓库](https://cnb.cool/framework-station/mini-agent-go)**，代码阅读、云端开发与构建记录的体验更完整。CNB 是腾讯云推出的代码托管及云原生开发平台，提供 Git 仓库、流水线和云端开发能力，见[官方文档](https://docs.cnb.cool/zh/)。本项目使用 CNB 管理代码、配置云端开发和 Docker-in-Docker（DinD）构建环境，并通过 CI/CD 检查与发布应用镜像；配置见 [`.cnb.yml`](.cnb.yml)，执行结果以仓库构建记录为准。GitHub 为 CNB `main` 自动同步的镜像。
+运行预构建镜像 `docker.cnb.cool/framework-station/mini-agent-go:latest`：
 
-## 环境准备
+- Git、GNU Make、curl
+- Docker Engine 或 Docker Desktop，包含 Compose v2
+- 可用的 Docker daemon，以及拉取镜像、访问模型服务的网络
 
-### 方式 A：本地环境
+在本地用项目 Dockerfile 构建镜像：
 
-两种启动模式都需要 **Git、GNU Make、Docker Engine / Docker Desktop、Docker Compose v2、curl**，以及可访问的 Docker daemon。预构建模式需要访问 CNB Registry；源码构建还需要拉取 Dockerfile 的基础镜像和 npm 依赖。
+- 上述环境
+- 可访问 Docker Hub 与 npm registry，用于下载 Go / Node 基础镜像和前端依赖
+- 宿主机无需安装 Go 或 Node.js，版本由多阶段 Dockerfile 提供
 
-**体验应用无需在宿主机安装 Go 或 Node.js。** Docker 多阶段构建已提供 Go 1.24 和 Node.js 24。直接开发源码或在宿主机执行测试时，才需要 Go 1.24+（race 需要 C 工具链）和 Node.js 24。
+在宿主机直接修改、编译和调试源码：
 
-当前正式镜像提供 `linux/amd64`，预构建模式会显式选择该平台。Apple Silicon 使用 Docker Desktop 的 AMD64 模拟支持；不具备模拟环境时选择本地构建，生成 Docker daemon 所在平台的镜像。
+- Go 1.24+
+- Node.js 24 与 npm（仅前端开发和测试需要）
+- `go test -race` 需要 C 工具链
 
-### 方式 B：可选开发容器
+可选开发容器：`docker.cnb.cool/arthur-cloud-native/jetbrains/goland:5.0.1`。它是可选的开发环境镜像，不是本项目的应用镜像；在其中开发仍需自行确保 Docker daemon 可用。
 
-```text
-docker.cnb.cool/arthur-cloud-native/jetbrains/goland:5.0.1
-```
-
-这是开发环境镜像，**不是正式应用镜像**。仓库的 CNB 云开发配置同时声明了 `vscode` 与 `docker` 配套服务，并检查 Docker / Compose。自行运行这个开发镜像时，仍需准备源码、Make、curl、Docker CLI、Compose，以及可访问的 Docker daemon / Socket；仅拉取镜像不会自动获得可工作的 DinD。具体依赖与访问位置见[运行指南](docs/running.md#开发容器与-docker-daemon)。
+发布镜像目前只提供 `linux/amd64`。Apple Silicon 需要 Docker 的 AMD64 模拟支持，或改用本地构建。
 
 ## 快速开始
 
 ```bash
 git clone https://cnb.cool/framework-station/mini-agent-go.git
 cd mini-agent-go
+
 make init
 ```
 
-选择启动方式，直接回车默认选 1：
+`make init` 会引导选择预构建镜像或从本地源码构建，并在缺少 `.env` 时按模板生成；已有 `.env` 不会被覆盖。
 
-1. **CNB 预构建镜像（推荐）**：每次 `make up` 拉取 `docker.cnb.cool/framework-station/mini-agent-go:latest`，不编译源码。
-2. **当前源码本地构建**：每次 `make up` 使用根目录 Dockerfile 构建前端与 Go 后端，不需要另外启动 Node 服务。
+编辑生成的 `.env`，填写模型 API Key 与本服务的 HTTP Bearer Token：
 
-编辑生成的 `.env`，填写**模型 API Key** 与**本服务 HTTP Bearer Token**。默认 BaseURL / Model 为作者已验收的 TokenHub 环境；如更换厂商，同时修改 BaseURL、Model、API Key。HTTP Token 可使用 `openssl rand -hex 32` 生成，两种凭证用途不同。
+- 默认使用作者已验收的腾讯云 TokenHub 与 `deepseek/deepseek-flash`。
+- 其他支持 OpenAI Chat Completions 与 Tool Calling 的服务商同样可用，切换时需同步修改 BaseURL、Model 和 API Key。
+- 没有合适的测试 Key 时，可以私下联系作者获取临时 TokenHub 凭据。
+- HTTP Token 可用 `openssl rand -hex 32` 生成，它与模型 API Key 用途不同。
 
 ```bash
 make up
 ```
 
-成功后终端会打印 Web UI、健康检查、API 入口与 `make logs` / `make down`，浏览器访问 **http://127.0.0.1:8080**。点击“试试计算器”，发送后再追问“把刚才的结果加上 24”；也可尝试创建、查询和完成 Todo。健康检查通过只代表应用可访问，实际模型可用性由对话验证。
+启动成功后访问 **http://127.0.0.1:8080**。
 
-启动模式保存在被 Git 忽略的 `.mini-agent-mode`，重新运行 `make init` 可切换；已有 `.env` 始终保留。非交互环境显式指定模式：
+`make up` 会按初始化时的选择拉取现成镜像或本地构建镜像，两种方式都只启动一个同时提供页面和 API 的应用容器，默认只绑定宿主机 `127.0.0.1:8080`。
 
-```bash
-make init MODE=image
-# 或 make init MODE=local
-```
+## HTTP API
 
-两个模式均只有一个应用容器，容器内固定监听 `0.0.0.0:8080`，默认仅映射宿主机 `127.0.0.1:8080`。CNB 云开发通过工作区的 8080 端口预览访问。`make init` / `make up` 不调用模型；发送聊天消息会使用配置的 Provider。
+`/healthz` 免认证；`/v1/*` 需要 Bearer Token。浏览器页面通过同源 `/api/*` 调用，凭证由 Go 服务内部注入，不进入前端产物。
 
-## HTTP API / curl
-
-`/healthz` 免认证；`/v1/*` 需要 Bearer Token。浏览器使用同源 `/api/*`，凭证由 Go 服务内部注入，不进入前端产物或浏览器存储。
-
-`.env` **不会自动成为当前 Shell 的环境变量**。以下命令在 **Bash、同一个终端**执行（zsh 用户先进入 `bash`），按提示粘贴 `.env` 中的 HTTP Token，输入不回显；不执行或 `source .env`。
+`.env` 不会自动成为当前 Shell 的环境变量。以下命令可直接复制执行，Token 由终端无回显读取：
 
 ```bash
 curl -fsS http://127.0.0.1:8080/healthz
 # {"status":"ok"}
 
-set +x
-read -r -s -p 'HTTP Token（与 .env 一致）: ' MINI_AGENT_AUTH_TOKEN
-printf '\n'
+printf 'HTTP Token: '; read -r -s TOKEN; printf '\n'
+```
 
+创建 Session，并复制返回的 `session_id`：
+
+```bash
 curl -fsS -X POST http://127.0.0.1:8080/v1/sessions \
-  -H "Authorization: Bearer $MINI_AGENT_AUTH_TOKEN" \
+  -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{}'
+# {"session_id":"..."}
+
+printf 'session_id: '; read -r SESSION_ID
 ```
 
-复制返回的 `session_id`，继续：
+用该 Session 发送消息，并继续追问：
 
 ```bash
-read -r -p 'session_id: ' SESSION_ID
-
 curl -fsS -X POST http://127.0.0.1:8080/v1/chat \
-  -H "Authorization: Bearer $MINI_AGENT_AUTH_TOKEN" \
+  -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d "{\"session_id\":\"$SESSION_ID\",\"message\":\"请使用计算工具计算37乘以48\"}"
-```
 
-成功响应为 JSON，包含 `status`、`reply`、`llm_calls` 与 `tool_calls`；预期算术结果为 `1776`，模型措辞及调用次数可能不同。用同一个 Session 追问：
-
-```bash
 curl -fsS -X POST http://127.0.0.1:8080/v1/chat \
-  -H "Authorization: Bearer $MINI_AGENT_AUTH_TOKEN" \
+  -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d "{\"session_id\":\"$SESSION_ID\",\"message\":\"把刚才的结果加上24，请继续使用计算工具\"}"
-
-unset MINI_AGENT_AUTH_TOKEN SESSION_ID
 ```
 
-预期算术结果为 `1800`。另一 Session 拥有独立历史；重启应用后需要重新创建 Session。
+响应为 JSON，包含 `status`、`reply`、`llm_calls` 与 `tool_calls`。在作者环境中，上述两轮分别得到 `1776` 与 `1800`；实际措辞和调用次数取决于模型。不同 `session_id` 的历史相互独立，服务重启后旧 Session 不再存在。
 
-## 系统设计与 Memory
+## 系统设计
 
 ```mermaid
 flowchart LR
@@ -120,42 +115,59 @@ flowchart LR
     D -->|是| T[Registry 校验 / Executor 执行]
     T --> R[按 Call ID 回填工具结果]
     R --> C
-    D -->|否且正常结束| F[整轮提交并返回]
+    D -->|否| F[提交本 Turn 并返回]
 ```
 
-**Loop 与工具。** Registry 提供工具名称、描述和参数 Schema，随请求发给模型；运行时解析 `content`、`tool_calls` 和 `finish_reason`，由模型自主决定工具调用。Executor 校验参数、处理超时、取消、重复 Call ID 和 panic。没有按用户输入关键词硬编码工具选择，也没有独立的思维链解析器。
+Loop：每个请求取出 `session_id` 对应的 Turn 快照，把已提交历史与本轮消息构造成上下文后调用模型。模型返回文本与 `tool_calls`：没有工具调用且 `finish_reason` 为 `stop` 时，本轮结束并向调用方返回回复；存在工具调用时，运行时依次执行调用、按 `tool_call_id` 回填 `role=tool` 消息，再次调用模型，直到得到最终回答或用尽预算。
 
-**召回时机与放置位置。** 每轮开始取得 `session_id` 对应的 Turn 快照；每次模型调用前，将已提交历史与本轮消息构造成上下文。逻辑顺序是 **System Prompt → Summary（如有）→ 历史与本轮消息**。用户输入、assistant 回复、工具调用及带 `tool_call_id` 的工具结果均可参与后续对话。System Prompt 成为首条 system 消息，Summary 紧随其后。
+工具注册与 Schema：Registry 保存每个工具的名称、描述与 JSON Schema，调用模型时整体作为 `tools[]` 下发。模型只看到这些声明，是否调用完全由模型决定，没有基于关键词的硬编码路由，也没有独立的思维链解析器。
 
-**基础压缩。** `MINI_AGENT_CONTEXT_TOKEN_BUDGET=0` 默认关闭压缩；设为正整数后，超出估算预算时对较早历史生成确定性的规则化有损摘要，保留 `MINI_AGENT_CONTEXT_KEEP_RECENT` 指定的近期消息下限。工具调用及其结果作为原子单元保留，不能拆散。提交时先由 `Turn.DropLeading` 删除已被摘要覆盖的前缀消息，再追加本轮新增消息；摘要、删除与新增在同一次提交内生效，失败则整轮回滚。压缩后仍超预算时明确失败。它不调用额外模型，不是高级语义记忆，Token 估算也不是精确 tokenizer。
+执行与校验：Executor 在执行前确认工具存在，并按 Schema 校验参数（必填字段、类型、枚举），随后在工具级超时内执行并隔离 panic。未知工具、参数非法、工具自身报错和工具超时都以 `IsError` 结果回填给模型，由模型决定下一步；panic 视为不可恢复的 `tool_failure`；同一 Run 内重复的 Call ID 直接拒绝，避免重复执行。
 
-**Todo 与原子提交。** Todo 是 Session 内的结构化状态，通过当前 Turn 绑定的工具读写，不是向量数据库或 RAG。消息、Summary 和 Todo 修改在同一 Turn 暂存，成功后原子提交；失败、取消或预算耗尽时整轮丢弃。这个保证覆盖运行时管理的状态，不撤销未来外部工具可能产生的副作用。
+预算与失败：默认每次 Run 最多 8 次模型调用和 8 次工具调用，工具超时 30s，请求超时 60s，均可通过 `.env` 调整。超出预算、模型故障、输出被截断或上下文取消都会终止本次 Run 并返回固定错误码；该轮产生的消息、摘要和 Todo 修改整体丢弃，不写入 Session。
 
-**边界。** Session 仅在进程内存中，服务重启后不保留历史、摘要或 Todo。浏览器 localStorage 保存的是页面记录，不能恢复已丢失的服务端上下文。当前没有跨会话长期记忆、多实例状态共享或用户账号体系；HTTP Bearer 是服务访问凭证，不代表按用户授权会话。
+## Session、Context 与 Memory
 
-关键实现：[启动装配](cmd/mini-agent/main.go) · [循环](agent/run.go) · [工具注册](service/tools.go) · [执行器](tool/executor.go) · [会话提交](session/manager.go) · [上下文](contextmgr/manager.go)。
+Session 隔离：每个 `session_id` 对应一个 Turn 快照，包含消息、摘要与 Todo。同会话请求串行执行，不同会话可并发，彼此不可见。
+
+上下文构建时机与顺序：每轮开始时取快照，每次模型调用前重新构造上下文，顺序固定为 System Prompt → Summary（如有）→ 已提交历史与本轮消息。System Prompt 作为首条 system 消息，Summary 紧随其后；用户输入、assistant 回复、工具调用和带 `tool_call_id` 的工具结果都按原始顺序参与后续对话。
+
+Memory 来源：记忆完全来自该 Session 已提交的消息、摘要和 Todo，没有 RAG、向量数据库或跨会话长期记忆。
+
+压缩：`MINI_AGENT_CONTEXT_TOKEN_BUDGET=0` 默认关闭压缩。设为正整数后，估算超出预算时由 `DigestSummarizer` 对较早历史生成确定性、规则化的有损摘要，并保留 `MINI_AGENT_CONTEXT_KEEP_RECENT` 条近期消息；一次工具调用及其结果作为原子单元，不会被拆散。提交时由 `Turn.DropLeading` 删除已被摘要覆盖的前缀消息，再追加本轮新增消息。压缩不调用额外模型，摘要只引用原始文本片段，不是语义记忆，Token 估算也不是精确 tokenizer；压缩后仍超预算时明确失败。
+
+原子提交与回滚：消息、Summary 和 Todo 在 Turn 内暂存，Run 成功时一次提交；失败、取消或预算耗尽时整轮丢弃。该保证覆盖运行时管理的状态，不撤销外部工具可能产生的副作用。
+
+边界：Session 仅存在于进程内存，重启后历史、摘要和 Todo 全部丢失。浏览器 localStorage 只保存页面记录，不能恢复服务端上下文。HTTP Bearer Token 是服务访问凭证，不代表按用户授权会话。
+
+关键实现：[启动装配](cmd/mini-agent/main.go)、[循环](agent/run.go)、[工具注册](tool/registry.go)、[执行器](tool/executor.go)、[会话提交](session/manager.go)、[上下文](contextmgr/manager.go)。
 
 ## 测试与 AI 辅助开发
 
 ```bash
-make ci        # Go build / vet / 单元与离线 E2E / race（含初始化与启动脚本测试）
-make web-stage # Docker 中执行前端单元测试、类型检查和生产构建
+make ci
 ```
 
-Go 测试及离线 E2E 不调用真实模型；覆盖工具、会话隔离、Todo 与压缩联合提交/回滚、预算和错误分类。浏览器测试入口为 `npm --prefix web run test:e2e`，环境要求与既有 31 场景结果见[前端说明](web/README.md)和[测试与验收](docs/verification.md)。
+该命令依次执行 `go build`、`go vet`、单元与离线 E2E 测试以及 `-race`，不调用真实模型。覆盖范围包括 Agent Loop（多步与单响应多调用）、工具注册与参数校验、内置工具、Session 隔离与并发、上下文压缩与整轮回滚、调用预算与错误分类、HTTP 契约与鉴权，以及初始化与启动脚本。
 
-TokenHub / `deepseek/deepseek-flash` 的既有真实模型证据、适用范围与局限保留在[测试与验收](docs/verification.md)。本次初始化与容器交付检查使用本地模拟 Provider，结果见[本次交付报告](docs/developer-onboarding-delivery.md)。AI Prompt 来源与实际问题修复记录见 [AI 辅助开发记录](docs/ai-assisted-development.md)。
+前端测试入口：`npm --prefix web run test`（单元测试）、`npm --prefix web run build`（类型检查与生产构建），浏览器 E2E 为 `npm --prefix web run test:e2e`，环境要求见 [web/README.md](web/README.md)。
 
-## 其他命令
+真实模型验收使用腾讯云 TokenHub 与 `deepseek/deepseek-flash`，覆盖普通对话、计算器、搜索、Todo 与会话隔离；记录、适用范围与证据边界见 [测试与验收](docs/verification.md)。AI 辅助开发过程与问题修复记录见 [AI 辅助开发记录](docs/ai-assisted-development.md)。架构与配置细节见 [Runtime 架构](docs/design/runtime-architecture.md) 与 [HTTP API 与配置](docs/design/http-api.md)。
+
+## 常用命令
 
 | 命令 | 用途 |
 | --- | --- |
-| `make init` | 创建或保留 `.env`，选择并保存启动模式 |
-| `make check` | 检查模式、配置、Docker / Compose / curl 与 daemon，不调用模型 |
-| `make up` | 按模式拉取或构建，启动单容器并检查容器状态、健康接口与页面 |
-| `make down` | 停止并移除容器，保留本地配置与模式；服务端内存会话丢失 |
+| `make init` | 选择镜像来源，生成 `.env` |
+| `make check` | 检查启动模式、`.env`、Docker / Compose 与 daemon，不调用模型 |
+| `make up` | 拉取或构建镜像，启动单容器并验证健康接口与页面 |
+| `make down` | 停止并移除容器 |
 | `make logs` | 查看应用日志 |
 | `make ps` | 查看容器状态 |
-| `make ci` | Go 构建、静态检查、单元与离线 E2E、race |
+| `make ci` | 构建、静态检查、单元与离线测试、race |
 
-进一步阅读：[运行指南](docs/running.md) · [Runtime 架构](docs/design/runtime-architecture.md) · [HTTP API 与配置](docs/design/http-api.md)。
+## 代码托管
+
+仓库地址：https://cnb.cool/framework-station/mini-agent-go
+
+本项目主要使用腾讯云 CNB 进行代码托管、云端开发及 Docker-in-Docker（DinD）开发与构建。CNB 是腾讯云提供的云原生研发平台，不熟悉该平台的开发者可以直接忽略这一说明，不影响项目的本地运行。
