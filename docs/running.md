@@ -20,7 +20,7 @@ docker pull docker.cnb.cool/arthur-cloud-native/jetbrains/goland:5.0.1
 
 这条命令只下载开发镜像。进入自行配置的开发容器后，还需要仓库源码、可用的 Docker daemon 与 Compose；CNB 的 `docker` 配套服务由平台提供。本仓库没有提供独立的本地 GoLand 容器编排文件，开发镜像的本地交互启动未在本次文档整理中验证。
 
-应用容器由仓库的 [Dockerfile](../Dockerfile) 单独构建：Go 1.24 编译阶段，Alpine 运行阶段，UID 10001 用户。`make up` 构建并运行的是这个应用镜像。
+后端容器由仓库的 [Dockerfile](../Dockerfile) 构建：Go 1.24 编译阶段，Alpine 运行阶段，UID 10001 用户。前端容器由 [web/Dockerfile](../web/Dockerfile) 构建：Node.js 24 编译 React 页面，运行阶段保留静态产物和同源代理，以非 root 用户运行。`make up` 同时启动两个容器。
 
 ## 本地容器操作
 
@@ -30,7 +30,7 @@ docker pull docker.cnb.cool/arthur-cloud-native/jetbrains/goland:5.0.1
 make init     # 检查 Docker/Compose，创建 .env，保留已有文件
 # 编辑 .env：填写模型根地址、模型 ID、模型密钥、HTTP 访问凭证
 make check    # 配置与环境预检查
-make up       # 构建、启动，并等待 /healthz 就绪
+make up       # 构建、启动，等待 API 和网页就绪；网页 http://127.0.0.1:3000
 make ps       # 容器状态
 make logs     # JSON 日志，Ctrl-C 退出查看
 make down     # 停止并移除容器，保留 .env
@@ -48,6 +48,10 @@ curl -sS http://127.0.0.1:9090/healthz
 ```
 
 后续请求也应使用新端口。服务退出会清空内存中的会话，重启后需要重新创建。
+
+网页默认映射到 `127.0.0.1:3000`；用 `MINI_AGENT_WEB_PORT=3001 make up` 更换端口。页面通过前端容器的 `/api/` 代理访问后端；HTTP 凭证仅由代理读取，不写入浏览器构建文件。两个容器都只向宿主机回环地址发布端口，前端共用一份服务访问凭证，当前没有访客登录体系。
+
+网页只在浏览器保存会话列表和消息。关闭容器不会删除浏览器中的记录；模型的会话上下文仍随后端退出而消失。浏览器存储不可用、服务会话失效、请求中断时，页面会给出对应提示。详见[前端说明](../web/README.md)。
 
 ## 直接运行 Go 二进制
 
@@ -85,12 +89,14 @@ BaseURL 应为兼容根地址，如 `https://host/v1`，客户端会追加 `/cha
 
 ## 构建、发布与仓库同步
 
-[Makefile](../Makefile) 的 `make ci` 是业务模块的检查入口。[`.cnb.yml`](../.cnb.yml) 配置任意分支 push / PR 执行检查；`main` push 检查通过后构建并推送应用镜像。开发镜像与应用镜像地址不同：
+[Makefile](../Makefile) 的 `make ci` 检查 Go 业务模块；`make web-image` 通过前端 Dockerfile 执行测试、类型检查和构建，本机也可安装前端依赖后执行 `make web-check`。[`.cnb.yml`](../.cnb.yml) 的任意分支 push / PR 检查前后端；`main` push 检查通过后推送两个镜像。开发镜像与应用镜像地址不同：
 
 ```text
 开发环境：docker.cnb.cool/arthur-cloud-native/jetbrains/goland:5.0.1
 应用镜像：docker.cnb.cool/framework-station/mini-agent-go:latest
 版本标签：docker.cnb.cool/framework-station/mini-agent-go:v<VERSION>-<提交短SHA>
+前端镜像：docker.cnb.cool/framework-station/mini-agent-go:web-latest
+前端版本：docker.cnb.cool/framework-station/mini-agent-go:web-v<VERSION>-<提交短SHA>
 ```
 
 版本标签由 [VERSION](../VERSION) 与构建提交派生，便于追溯源码；可变基础镜像、重复构建和 Registry 权限仍会影响制品，源码中的命名规则本身不保证标签不可覆盖。需要精确锁定制品时使用实际镜像 digest。

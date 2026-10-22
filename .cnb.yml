@@ -1,7 +1,7 @@
 # CNB 云原生构建配置（语法参考 https://docs.cnb.cool/zh/build/grammar.html）。
 #
 # 触发模型：
-#   * 任意分支 push / 任意目标分支的 PR → 只做检查（make ci），不发布任何制品；
+#   * 任意分支 push / 任意目标分支的 PR → 检查 Go 与前端构建，不发布任何制品；
 #   * 仅 main 的 push → 检查通过后才构建并推送镜像；检查失败即中止，latest 不会被更新。
 #
 # 镜像地址由 CNB 内置变量推导（CNB_DOCKER_REGISTRY + CNB_REPO_SLUG_LOWERCASE），
@@ -27,6 +27,8 @@ $:
 
   pull_request:
     - name: pr-check
+      services:
+        - docker
       docker:
         image: golang:1.24
         volumes:
@@ -35,9 +37,13 @@ $:
       stages:
         - name: check
           script: make ci
+        - name: frontend-check
+          script: make web-image
 
   push:
     - name: branch-ci
+      services:
+        - docker
       docker:
         image: golang:1.24
         volumes:
@@ -46,11 +52,15 @@ $:
       stages:
         - name: check
           script: make ci
+        - name: frontend-check
+          script: make web-image
 
 # main / develop 上的 PR：只检查，不发布（发布只由 main 的 push 触发）。
 "(main|develop)":
   pull_request:
     - name: pr-check
+      services:
+        - docker
       docker:
         image: golang:1.24
         volumes:
@@ -59,10 +69,14 @@ $:
       stages:
         - name: check
           script: make ci
+        - name: frontend-check
+          script: make web-image
 
 develop:
   push:
     - name: develop-ci
+      services:
+        - docker
       docker:
         image: golang:1.24
         volumes:
@@ -71,6 +85,8 @@ develop:
       stages:
         - name: check
           script: make ci
+        - name: frontend-check
+          script: make web-image
 
 main:
   push:
@@ -86,7 +102,7 @@ main:
         # 同一流水线内先检查再发布：任一检查失败都会中止后面的镜像构建与推送。
         - name: check
           script: make ci
-        - name: build-and-push-image
+        - name: build-and-push-images
           script: |
             set -euo pipefail
 
@@ -102,7 +118,8 @@ main:
 
             image="${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}"
             versioned="${image}:v${version}-${CNB_COMMIT_SHORT}"
-            echo "镜像：${versioned}（源码 ${CNB_COMMIT}）"
+            web_versioned="${image}:web-v${version}-${CNB_COMMIT_SHORT}"
+            echo "镜像：${versioned} / ${web_versioned}（源码 ${CNB_COMMIT}）"
 
             printf '%s' "${CNB_TOKEN}" | docker login \
               --username "${CNB_TOKEN_USER_NAME}" \
@@ -110,21 +127,19 @@ main:
 
             # 只构建一次；latest 由同一镜像 tag 派生，保证两个标签指向同一制品。
             docker build --pull -t "${versioned}" .
+            docker build --pull -t "${web_versioned}" web
 
-            # 兜底断言：镜像里不能出现本地 .env 或 Git 内部文件。
-            if docker run --rm --entrypoint /bin/sh "${versioned}" \
-              -c 'test ! -e /app/.env && test ! -e /app/.git'; then
-              echo "✓ 镜像不含 .env / .git"
-            else
-              echo "✗ 镜像包含 .env 或 .git，拒绝发布" >&2
-              exit 1
-            fi
+            # 两个镜像均在构建/测试完成后发布；凭证只在运行时注入。
+            for artifact in "${versioned}" "${web_versioned}"; do
+              docker run --rm --entrypoint /bin/sh "${artifact}" \
+                -c 'test ! -e /app/.env && test ! -e /app/.git'
+            done
 
             docker tag "${versioned}" "${image}:latest"
-
-            # 先推不可变版本标签，成功后再移动 latest：
-            # 中途失败时 latest 仍指向最后一次成功发布。
+            docker tag "${web_versioned}" "${image}:web-latest"
             docker push "${versioned}"
+            docker push "${web_versioned}"
             docker push "${image}:latest"
-            echo "✓ 已发布 ${versioned}"
-            echo "✓ 已更新 ${image}:latest"
+            docker push "${image}:web-latest"
+            echo "✓ 已发布后端 ${versioned}"
+            echo "✓ 已发布前端 ${web_versioned}"
