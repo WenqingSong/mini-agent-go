@@ -6,8 +6,9 @@
 // 因此一次 chat 恰好一次真实 RunTurn：COMPLETED 整轮原子提交，其余终态整轮丢弃。
 //
 // 本包不实现 HTTP 协议、会话存储、Provider 与具体工具；它负责在每次 Run 内把工具注册表
-// 与「当前 Turn 的 Todo 能力」组装起来（见 tools.go / todo.go）。生产 Summarizer 与
-// tokenizer 校准不属于本层（v1 TokenBudget 固定 0）。
+// 与「当前 Turn 的 Todo 能力」组装起来（见 tools.go / todo.go），同时装配上下文压缩：
+// Config.TokenBudget > 0 时启用，Deps.Summarizer 为空则使用 contextmgr.DigestSummarizer
+// （确定性规则化摘要，不产生额外模型调用）。生产 Summarizer 与 tokenizer 校准不属于本层。
 package service
 
 import (
@@ -37,6 +38,10 @@ const (
 	DefaultMaxToolCalls = 8
 	// DefaultToolTimeout 是单次工具执行的默认超时。
 	DefaultToolTimeout = 30 * time.Second
+	// DefaultKeepRecent 是压缩时保留的近期消息条数默认值：约最近 4 轮问答
+	// （user + assistant）；工具原子单元可能让实际保留条数略高于该值。
+	// 压缩只在 TokenBudget > 0 时发生，本默认值不改变 TokenBudget = 0 的行为。
+	DefaultKeepRecent = 8
 )
 
 // SessionRunner 是装配层需要的会话执行权能力，*session.Manager 结构匹配。
@@ -54,9 +59,11 @@ type Config struct {
 	SystemPrompt string
 	// Model 透传 llm.Request.Model，必须非空。
 	Model string
-	// TokenBudget 是上下文预算；v1 固定为 0（不压缩），非 0 视为配置非法。
+	// TokenBudget 是上下文估算预算：> 0 启用压缩，0 表示禁用（默认），负值非法。
+	// 它是估算值而非 Provider 真实计费，配置时应留安全余量。
 	TokenBudget int
-	// KeepRecent 是保留条数的硬下限，默认 0，必须 >= 0。
+	// KeepRecent 是压缩时保留的近期消息条数硬下限，默认 DefaultKeepRecent（0 视为未配置），
+	// 负值非法。它按消息条数计，工具调用与其结果会作为原子单元整体保留。
 	KeepRecent int
 	// ToolTimeout 是工具级超时，默认 DefaultToolTimeout；负值表示不设（透传 agent.Config 语义）。
 	ToolTimeout time.Duration
@@ -74,6 +81,11 @@ func (c Config) withDefaults() Config {
 	if out.ToolTimeout == 0 {
 		out.ToolTimeout = DefaultToolTimeout
 	}
+	// KeepRecent = 0 视为「未配置」：显式传 0 无法与零值区分，而「不保留任何近期消息」
+	// 会让压缩后的视图失去本轮用户输入，因此默认填充保留下限。
+	if out.KeepRecent == 0 {
+		out.KeepRecent = DefaultKeepRecent
+	}
 	return out
 }
 
@@ -88,8 +100,8 @@ func (c Config) validate() error {
 	if c.Model == "" {
 		return errors.New("service: Model 不能为空")
 	}
-	if c.TokenBudget != 0 {
-		return fmt.Errorf("service: v1 禁用上下文压缩，TokenBudget 必须为 0，当前为 %d", c.TokenBudget)
+	if c.TokenBudget < 0 {
+		return fmt.Errorf("service: TokenBudget 不能为负数（0 表示禁用压缩），当前为 %d", c.TokenBudget)
 	}
 	if c.KeepRecent < 0 {
 		return fmt.Errorf("service: KeepRecent 不能为负数，当前为 %d", c.KeepRecent)
@@ -115,7 +127,8 @@ type Deps struct {
 	Sink runlog.Sink
 	// Estimator 覆盖默认的上下文估算器；nil 时使用 HeuristicEstimator。
 	Estimator contextmgr.Estimator
-	// Summarizer 覆盖默认的 fail-closed 占位实现；仅供测试注入，生产装配必须留空。
+	// Summarizer 覆盖默认的上下文摘要器；nil 时使用 DigestSummarizer（确定性、零模型调用）。
+	// 注入自定义实现时，其调用发生在 contextmgr.Build 内，受 ctx 取消/超时约束。
 	Summarizer contextmgr.Summarizer
 }
 
@@ -130,8 +143,8 @@ var _ httpapi.Runner = (*Runner)(nil)
 
 // NewRunner 校验配置与依赖并构造 Runner。
 //
-// 配置非法（预算非正、Model 为空、TokenBudget != 0、ToolTimeout 非正）或依赖缺失时返回错误，
-// 不构造任何可执行对象。
+// 配置非法（调用预算非正、Model 为空、TokenBudget 为负、KeepRecent 为负）或依赖缺失时
+// 返回错误，不构造任何可执行对象。
 func NewRunner(deps Deps, cfg Config) (*Runner, error) {
 	normalized := cfg.withDefaults()
 	if err := normalized.validate(); err != nil {
@@ -156,7 +169,8 @@ func NewRunner(deps Deps, cfg Config) (*Runner, error) {
 	}
 	summarizer := deps.Summarizer
 	if summarizer == nil {
-		summarizer = failClosedSummarizer{}
+		// 默认摘要器不调用模型：TokenBudget = 0 时永不被触发；启用预算时也能离线工作。
+		summarizer = contextmgr.DigestSummarizer{}
 	}
 	contexts, err := contextmgr.NewManager(estimator, summarizer)
 	if err != nil {
@@ -248,18 +262,4 @@ func runErrorOf(result core.RunResult) error {
 		return result.Error
 	}
 	return core.NewError(core.KindInternal, opRun, "非 COMPLETED 结论缺少错误")
-}
-
-// failClosedSummarizer 是 v1 的 fail-closed 占位实现：被调用即证明装配错误。
-//
-// v1 固定 TokenBudget = 0，contextmgr.Build 不会触发压缩，因此正常路径永不调用；
-// 它不是生产级摘要能力（生产 LLM Summarizer 与 tokenizer 校准属 T08）。
-type failClosedSummarizer struct{}
-
-var _ contextmgr.Summarizer = failClosedSummarizer{}
-
-// Summarize 始终返回 internal 错误，不做任何摘要。
-func (failClosedSummarizer) Summarize(context.Context, contextmgr.SummarizeRequest) (string, error) {
-	return "", core.NewError(core.KindInternal, "service.failClosedSummarizer.Summarize",
-		"v1 禁用上下文压缩，不得调用 Summarizer")
 }

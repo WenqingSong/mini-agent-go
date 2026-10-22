@@ -191,10 +191,13 @@ type RunOutcome struct {
 | `MINI_AGENT_MAX_LLM_CALLS` | 否 | `8` | `RunPolicy.MaxLLMCalls` |
 | `MINI_AGENT_MAX_TOOL_CALLS` | 否 | `8` | `RunPolicy.MaxToolCalls` |
 | `MINI_AGENT_TOOL_TIMEOUT` | 否 | `30s` | 工具级超时，`<= 0` 表示不设 |
+| `MINI_AGENT_CONTEXT_TOKEN_BUDGET` | 否 | `0` | 上下文估算预算；`0` 表示禁用压缩，必须为非负整数 |
+| `MINI_AGENT_CONTEXT_KEEP_RECENT` | 否 | `8` | 压缩时保留的近期消息条数下限；必须为非负整数，`0` 视为未配置 |
 
 - 配置结构必须实现脱敏 `String()`：`%v` / `%+v` / `%#v` 都不输出明文凭证，输出 `<redacted>` / `<unset>`。
 - 运行日志只经 `runlog.Sink` 记录，Sink 失败不得改变响应、Run 状态或计数。
-- v1 固定 `TokenBudget = 0`：不实现上下文压缩；`contextmgr.NewManager` 要求的 `Summarizer` 使用 fail-closed 占位实现，正常路径永不被调用，且不得被表述为生产级摘要能力。
+- 上下文压缩默认关闭：`MINI_AGENT_CONTEXT_TOKEN_BUDGET` 未配置或为 `0` 时行为与旧版本一致（不压缩、历史继续累积）。配置正整数后，`service.Runner` 把预算与 `KeepRecent` 透传 Agent Loop；默认 `Summarizer` 是 `contextmgr.DigestSummarizer`（确定性规则化摘录，零模型调用），不需要额外服务或真实模型。
+- 预算不可满足时 `Build` 返回 `invalid_argument`，按既有错误分类映射为 `internal`（不新增协议码）；HTTP 响应仍只有固定 `code`/`message`，精确原因通过 Run 结论与运行日志观察。
 
 ## 9. 服务层不变量
 

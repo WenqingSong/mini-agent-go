@@ -333,6 +333,9 @@ func (m *manager) estimateMessage(msg core.Message) (int, error) {
 }
 
 // estimateView 估算整个视图的 token 总量。
+//
+// 逐条累加使用饱和加法：估算器可能对单条超长消息返回上限值，普通加法在病态输入下
+// 会溢出为负数，从而把「严重超预算」误判成「在预算内」。
 func (m *manager) estimateView(msgs []core.Message) (int, error) {
 	total := 0
 	for _, msg := range msgs {
@@ -340,7 +343,7 @@ func (m *manager) estimateView(msgs []core.Message) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		total += tokens
+		total = saturatingAdd(total, tokens)
 	}
 	return total, nil
 }
