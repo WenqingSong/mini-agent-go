@@ -30,6 +30,7 @@ func TestErrorCodeStatusMapping(t *testing.T) {
 		{CodeUnauthorized, http.StatusUnauthorized},
 		{CodeNotFound, http.StatusNotFound},
 		{CodeMethodNotAllowed, http.StatusMethodNotAllowed},
+		{CodeForbiddenOrigin, http.StatusForbidden},
 		{CodeSessionNotFound, http.StatusNotFound},
 		{CodeSessionExpired, http.StatusNotFound},
 		{CodeSessionExists, http.StatusConflict},

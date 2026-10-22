@@ -15,7 +15,8 @@ import (
 	"testing"
 )
 
-// expectedE2EFiles 是 Design §12 为本次验收登记的 6 个文件（全部仅测试）。
+// expectedE2EFiles 是本套件的全部文件（全部仅测试）：原 6 个验收文件 +
+// Todo 端到端验收文件（正式装配接入 Todo 后新增）。
 var expectedE2EFiles = []string{
 	"harness_test.go",
 	"chat_test.go",
@@ -23,6 +24,7 @@ var expectedE2EFiles = []string{
 	"timeout_test.go",
 	"concurrency_test.go",
 	"offline_test.go",
+	"todo_test.go",
 }
 
 // TestNoRealProviderOrCredential 是 AC-005 的机械证据入口。

@@ -100,12 +100,26 @@ check_positive_int() {
   esac
 }
 
+# 上下文压缩配置允许 0：MINI_AGENT_CONTEXT_TOKEN_BUDGET=0 表示禁用压缩，
+# MINI_AGENT_CONTEXT_KEEP_RECENT=0 表示使用应用默认值。应用侧 nonNegativeIntEnv
+# 只拒绝负数与非整数，这里保持同一口径。
+check_non_negative_int() {
+  name=$1
+  current=$(value "$name")
+  [ -z "$current" ] && return 0
+  case "$current" in
+    *[!0-9]*) report "$name 必须是非负整数" "0 表示禁用压缩或使用默认值，非 0 例如 4096 / 8" ;;
+  esac
+}
+
 check_duration MINI_AGENT_REQUEST_TIMEOUT
 check_duration MINI_AGENT_SHUTDOWN_GRACE
 check_duration MINI_AGENT_TOOL_TIMEOUT signed
 check_positive_int MINI_AGENT_MAX_REQUEST_BYTES
 check_positive_int MINI_AGENT_MAX_LLM_CALLS
 check_positive_int MINI_AGENT_MAX_TOOL_CALLS
+check_non_negative_int MINI_AGENT_CONTEXT_TOKEN_BUDGET
+check_non_negative_int MINI_AGENT_CONTEXT_KEEP_RECENT
 
 # make up 依赖 Docker Compose 与宿主机的 curl（轮询 /healthz）。
 if ! command -v docker >/dev/null 2>&1; then

@@ -13,6 +13,7 @@ import (
 	"sync"
 	"testing"
 
+	"cnb.cool/framework-station/mini-agent-go/builtin"
 	"cnb.cool/framework-station/mini-agent-go/core"
 	"cnb.cool/framework-station/mini-agent-go/httpapi"
 	"cnb.cool/framework-station/mini-agent-go/llm"
@@ -383,8 +384,9 @@ func newRealRunner(t *testing.T, provider llm.Provider, manager *session.Manager
 	runner, err := service.NewRunner(service.Deps{
 		Provider: provider,
 		Sessions: manager,
-		Registry: registry,
-		Sink:     sink,
+		// 本文件的用例只关心 HTTP 协议与失败路径，工具集合固定为上送的注册表。
+		Tools: func(builtin.TodoOperations) (tool.Registry, error) { return registry, nil },
+		Sink:  sink,
 	}, service.Config{Model: "test-model"})
 	if err != nil {
 		t.Fatalf("构造 Runner 失败：%v", err)

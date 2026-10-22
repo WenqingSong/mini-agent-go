@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"cnb.cool/framework-station/mini-agent-go/builtin"
 	"cnb.cool/framework-station/mini-agent-go/contextmgr"
 	"cnb.cool/framework-station/mini-agent-go/core"
 	"cnb.cool/framework-station/mini-agent-go/httpapi"
@@ -151,7 +153,7 @@ func (r *recordingTool) executed() []core.ToolCall {
 	return out
 }
 
-// countingSummarizer 统计被调用次数；v1 禁用压缩，正常路径必须为 0。
+// countingSummarizer 统计被调用次数；TokenBudget = 0 时正常路径必须为 0。
 type countingSummarizer struct {
 	mu    sync.Mutex
 	calls int
@@ -246,6 +248,13 @@ func newRegistry(t *testing.T, item tool.Tool) *tool.MapRegistry {
 	return registry
 }
 
+// fixedTools 让用例注入固定工具集合：忽略 Todo 端口，等价于「本轮工具全部无会话状态」。
+func fixedTools(registry tool.Registry) ToolsetFactory {
+	return func(builtin.TodoOperations) (tool.Registry, error) {
+		return registry, nil
+	}
+}
+
 // newTestRunner 构造装配层 Runner。
 func newTestRunner(t *testing.T, deps Deps, cfg Config) *Runner {
 	t.Helper()
@@ -270,7 +279,7 @@ func TestRunUsesExactlyOneRealRunTurn(t *testing.T) {
 	seedSession(t, manager, "s-1")
 	sessions := &countingSessions{manager: manager}
 
-	runner := newTestRunner(t, Deps{Provider: provider, Sessions: sessions, Registry: newRegistry(t, calculator)}, Config{})
+	runner := newTestRunner(t, Deps{Provider: provider, Sessions: sessions, Tools: fixedTools(newRegistry(t, calculator))}, Config{})
 
 	outcome, err := runner.Run(context.Background(), httpapi.RunRequest{SessionID: "s-1", RunID: "run-1", Message: "1+2 等于多少"})
 	if err != nil {
@@ -319,7 +328,7 @@ func TestRunSecondTurnSeesPreviousHistory(t *testing.T) {
 	}}
 	manager := newManager()
 	seedSession(t, manager, "s-1")
-	runner := newTestRunner(t, Deps{Provider: provider, Sessions: manager, Registry: newRegistry(t, &recordingTool{name: "calculator"})}, Config{})
+	runner := newTestRunner(t, Deps{Provider: provider, Sessions: manager, Tools: fixedTools(newRegistry(t, &recordingTool{name: "calculator"}))}, Config{})
 
 	if _, err := runner.Run(context.Background(), httpapi.RunRequest{SessionID: "s-1", RunID: "run-1", Message: "第一轮问题"}); err != nil {
 		t.Fatalf("第一轮失败：%v", err)
@@ -371,7 +380,7 @@ func TestRunUnknownSessionDoesNotInvokeRun(t *testing.T) {
 	provider := &scriptedProvider{script: []llm.Response{textResponse("resp-1", "不应出现")}}
 	manager := newManager()
 	sessions := &countingSessions{manager: manager}
-	runner := newTestRunner(t, Deps{Provider: provider, Sessions: sessions, Registry: newRegistry(t, &recordingTool{name: "calculator"})}, Config{})
+	runner := newTestRunner(t, Deps{Provider: provider, Sessions: sessions, Tools: fixedTools(newRegistry(t, &recordingTool{name: "calculator"}))}, Config{})
 
 	_, err := runner.Run(context.Background(), httpapi.RunRequest{SessionID: "missing", RunID: "run-1", Message: "hi"})
 	if !errors.Is(err, session.ErrSessionNotFound) {
@@ -398,7 +407,7 @@ func TestRunProviderFailureLeavesNoPartialHistory(t *testing.T) {
 	provider := &scriptedProvider{onCall: func(context.Context, int) (llm.Response, error) {
 		return llm.Response{}, errors.New("上游不可用")
 	}}
-	runner := newTestRunner(t, Deps{Provider: provider, Sessions: manager, Registry: newRegistry(t, &recordingTool{name: "calculator"})}, Config{})
+	runner := newTestRunner(t, Deps{Provider: provider, Sessions: manager, Tools: fixedTools(newRegistry(t, &recordingTool{name: "calculator"}))}, Config{})
 
 	outcome, err := runner.Run(context.Background(), httpapi.RunRequest{SessionID: "s-1", RunID: "run-1", Message: "这一轮应被丢弃"})
 	if err != nil {
@@ -434,7 +443,7 @@ func TestRunClientCancelLeavesNoPartialHistory(t *testing.T) {
 		observed <- ctx.Err()
 		return llm.Response{}, ctx.Err()
 	}}
-	runner := newTestRunner(t, Deps{Provider: provider, Sessions: manager, Registry: newRegistry(t, &recordingTool{name: "calculator"})}, Config{})
+	runner := newTestRunner(t, Deps{Provider: provider, Sessions: manager, Tools: fixedTools(newRegistry(t, &recordingTool{name: "calculator"}))}, Config{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -477,7 +486,7 @@ func TestRunDeadlineIsDistinguishableFromCancel(t *testing.T) {
 		<-ctx.Done()
 		return llm.Response{}, ctx.Err()
 	}}
-	runner := newTestRunner(t, Deps{Provider: provider, Sessions: manager, Registry: newRegistry(t, &recordingTool{name: "calculator"})}, Config{})
+	runner := newTestRunner(t, Deps{Provider: provider, Sessions: manager, Tools: fixedTools(newRegistry(t, &recordingTool{name: "calculator"}))}, Config{})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
@@ -505,7 +514,7 @@ func TestRunCompletedButCommitRejectedIsNotSuccess(t *testing.T) {
 	runner := newTestRunner(t, Deps{
 		Provider: provider,
 		Sessions: commitRejectingSessions{manager: manager},
-		Registry: newRegistry(t, &recordingTool{name: "calculator"}),
+		Tools:    fixedTools(newRegistry(t, &recordingTool{name: "calculator"})),
 	}, Config{})
 
 	outcome, err := runner.Run(context.Background(), httpapi.RunRequest{SessionID: "s-1", RunID: "run-1", Message: "hi"})
@@ -530,7 +539,7 @@ func TestRunSameSessionConcurrentChatsSerialize(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 		return textResponse("resp", "回答"), nil
 	}}
-	runner := newTestRunner(t, Deps{Provider: provider, Sessions: sessions, Registry: newRegistry(t, &recordingTool{name: "calculator"})}, Config{})
+	runner := newTestRunner(t, Deps{Provider: provider, Sessions: sessions, Tools: fixedTools(newRegistry(t, &recordingTool{name: "calculator"}))}, Config{})
 
 	var waitGroup sync.WaitGroup
 	results := make([]error, 2)
@@ -579,8 +588,9 @@ func TestRunSameSessionConcurrentChatsSerialize(t *testing.T) {
 	}
 }
 
-// TestRunNeverCallsSummarizer 核对 v1 禁用压缩：占位摘要器在任何路径都零调用（INV-H12）。
-func TestRunNeverCallsSummarizer(t *testing.T) {
+// TestRunNeverCallsSummarizerWhenBudgetDisabled 核对 TokenBudget = 0（默认）时即使注入
+// 摘要器也零调用：未配置预算不改变旧行为。
+func TestRunNeverCallsSummarizerWhenBudgetDisabled(t *testing.T) {
 	summarizer := &countingSummarizer{}
 	provider := &scriptedProvider{script: []llm.Response{
 		textResponse("resp-1", "长历史回答"),
@@ -598,7 +608,7 @@ func TestRunNeverCallsSummarizer(t *testing.T) {
 	runner := newTestRunner(t, Deps{
 		Provider:   provider,
 		Sessions:   manager,
-		Registry:   newRegistry(t, &recordingTool{name: "calculator"}),
+		Tools:      fixedTools(newRegistry(t, &recordingTool{name: "calculator"})),
 		Summarizer: summarizer,
 	}, Config{KeepRecent: 0})
 
@@ -612,7 +622,7 @@ func TestRunNeverCallsSummarizer(t *testing.T) {
 		t.Fatalf("终态 = %q，期望 COMPLETED", outcome.Status)
 	}
 	if summarizer.callCount() != 0 {
-		t.Fatalf("v1 不得调用 Summarizer，实际调用 %d 次", summarizer.callCount())
+		t.Fatalf("TokenBudget=0 时不得调用 Summarizer，实际调用 %d 次", summarizer.callCount())
 	}
 }
 
@@ -622,7 +632,7 @@ func TestNewRunnerFailClosed(t *testing.T) {
 		return Deps{
 			Provider: &scriptedProvider{},
 			Sessions: newManager(),
-			Registry: newRegistry(t, &recordingTool{name: "calculator"}),
+			Tools:    fixedTools(newRegistry(t, &recordingTool{name: "calculator"})),
 		}
 	}
 
@@ -631,14 +641,14 @@ func TestNewRunnerFailClosed(t *testing.T) {
 		deps Deps
 		cfg  Config
 	}{
-		{name: "TokenBudget 非 0", deps: validDeps(), cfg: Config{Model: "m", TokenBudget: 1}},
+		{name: "TokenBudget 为负", deps: validDeps(), cfg: Config{Model: "m", TokenBudget: -1}},
 		{name: "Model 为空", deps: validDeps(), cfg: Config{}},
 		{name: "MaxLLMCalls 为负", deps: validDeps(), cfg: Config{Model: "m", MaxLLMCalls: -1}},
 		{name: "MaxToolCalls 为负", deps: validDeps(), cfg: Config{Model: "m", MaxToolCalls: -1}},
 		{name: "KeepRecent 为负", deps: validDeps(), cfg: Config{Model: "m", KeepRecent: -1}},
-		{name: "缺少 Provider", deps: Deps{Sessions: newManager(), Registry: tool.NewMapRegistry()}, cfg: Config{Model: "m"}},
-		{name: "缺少 Sessions", deps: Deps{Provider: &scriptedProvider{}, Registry: tool.NewMapRegistry()}, cfg: Config{Model: "m"}},
-		{name: "缺少 Registry", deps: Deps{Provider: &scriptedProvider{}, Sessions: newManager()}, cfg: Config{Model: "m"}},
+		{name: "缺少 Provider", deps: Deps{Sessions: newManager(), Tools: fixedTools(tool.NewMapRegistry())}, cfg: Config{Model: "m"}},
+		{name: "缺少 Sessions", deps: Deps{Provider: &scriptedProvider{}, Tools: fixedTools(tool.NewMapRegistry())}, cfg: Config{Model: "m"}},
+		{name: "缺少 Tools", deps: Deps{Provider: &scriptedProvider{}, Sessions: newManager()}, cfg: Config{Model: "m"}},
 	}
 
 	for _, item := range cases {
@@ -652,19 +662,21 @@ func TestNewRunnerFailClosed(t *testing.T) {
 	if _, err := NewRunner(validDeps(), Config{Model: "m"}); err != nil {
 		t.Fatalf("合法配置构造失败：%v", err)
 	}
-}
-
-// TestFailClosedSummarizerAlwaysFails 核对占位摘要器不是生产级能力：被调用即返回 internal。
-func TestFailClosedSummarizerAlwaysFails(t *testing.T) {
-	summary, err := failClosedSummarizer{}.Summarize(context.Background(), contextmgr.SummarizeRequest{})
-	if err == nil {
-		t.Fatal("占位摘要器被调用时必须返回错误")
+	// 启用上下文预算也是合法配置：不允许再以「v1 禁用压缩」为由拒绝。
+	runner, err := NewRunner(validDeps(), Config{Model: "m", TokenBudget: 1000, KeepRecent: 4})
+	if err != nil {
+		t.Fatalf("启用上下文预算的配置构造失败：%v", err)
 	}
-	if summary != "" {
-		t.Fatalf("占位摘要器不得返回摘要，实际 %q", summary)
+	if runner.cfg.TokenBudget != 1000 || runner.cfg.KeepRecent != 4 {
+		t.Fatalf("配置未按输入生效：%+v", runner.cfg)
 	}
-	if core.KindOf(err) != core.KindInternal {
-		t.Fatalf("错误种类 = %q，期望 internal", core.KindOf(err))
+	// KeepRecent 未配置时使用默认值，保证压缩后仍保留本轮近期消息。
+	defaulted, err := NewRunner(validDeps(), Config{Model: "m", TokenBudget: 1000})
+	if err != nil {
+		t.Fatalf("默认 KeepRecent 的配置构造失败：%v", err)
+	}
+	if defaulted.cfg.KeepRecent != DefaultKeepRecent {
+		t.Fatalf("KeepRecent 默认值 = %d，期望 %d", defaulted.cfg.KeepRecent, DefaultKeepRecent)
 	}
 }
 
@@ -691,4 +703,244 @@ func textOf(message core.Message) string {
 		builder.WriteString(part.Text)
 	}
 	return builder.String()
+}
+
+// seedLongHistory 写入 pairs 轮「问题 + 回答」的中文历史，用于触发真实预算压缩。
+// 每条消息约 14 个估算 token（4 条消息固定开销 + 10 个 CJK 字符），便于按算术定位预算。
+func seedLongHistory(t *testing.T, manager *session.Manager, sessionID string, pairs int) []core.Message {
+	t.Helper()
+	messages := make([]core.Message, 0, pairs*2)
+	for index := 0; index < pairs; index++ {
+		messages = append(messages,
+			userMessageFor("历史问题"+strconv.Itoa(index)+"号内容内容"),
+			assistantMessageFor("历史回答"+strconv.Itoa(index)+"号内容内容"),
+		)
+	}
+	seedSession(t, manager, sessionID, messages...)
+	return messages
+}
+
+// estimateView 用生产默认估算器重新累加消息视图，用于核对「发给 Provider 的视图不超预算」。
+func estimateView(messages []core.Message) int {
+	var estimator contextmgr.HeuristicEstimator
+	total := 0
+	for _, message := range messages {
+		total += estimator.EstimateMessage(message)
+	}
+	return total
+}
+
+// TestRunCompactsConfiguredBudgetAndCommitsSummary 覆盖 AC-001 / AC-002 的装配层证据：
+// 只通过正式 service.Config 启用预算，默认摘要器即触发压缩；摘要随 COMPLETED 提交，
+// 旧历史被删除，第二轮对话能召回摘要。
+func TestRunCompactsConfiguredBudgetAndCommitsSummary(t *testing.T) {
+	manager := newManager()
+	seeded := seedLongHistory(t, manager, "s-1", 40)
+	provider := &scriptedProvider{script: []llm.Response{
+		textResponse("resp-1", "第一轮回答"),
+		textResponse("resp-2", "第二轮回答"),
+	}}
+	runner := newTestRunner(t, Deps{
+		Provider: provider,
+		Sessions: manager,
+		Tools:    fixedTools(newRegistry(t, &recordingTool{name: "calculator"})),
+	}, Config{TokenBudget: 700, KeepRecent: 4})
+
+	outcome, err := runner.Run(context.Background(), httpapi.RunRequest{SessionID: "s-1", RunID: "run-1", Message: "第一轮追问"})
+	if err != nil {
+		t.Fatalf("Run 返回错误：%v", err)
+	}
+	if outcome.Status != core.RunStatusCompleted {
+		t.Fatalf("终态 = %q，期望 COMPLETED（error=%v）", outcome.Status, outcome.Err)
+	}
+
+	first := provider.requestAt(t, 1)
+	if len(first.Messages) == 0 || first.Messages[0].Role != core.Role("system") {
+		t.Fatalf("压缩后视图首条必须是摘要 system 消息：%+v", first.Messages)
+	}
+	if !strings.Contains(textOf(first.Messages[0]), "早期对话摘要") {
+		t.Fatalf("摘要缺少可识别标记：%q", textOf(first.Messages[0]))
+	}
+	if got := estimateView(first.Messages); got > 700 {
+		t.Fatalf("发给 Provider 的视图估算值 = %d，超出配置预算 700", got)
+	}
+	if !strings.Contains(textOf(first.Messages[len(first.Messages)-1]), "第一轮追问") {
+		t.Fatalf("压缩丢弃了本轮用户输入：%+v", first.Messages)
+	}
+	for _, message := range first.Messages {
+		if textOf(message) == textOf(seeded[0]) {
+			t.Fatalf("被摘要覆盖的最早历史仍被发送给 Provider")
+		}
+	}
+
+	after := snapshot(t, manager, "s-1")
+	if !strings.Contains(after.Summary, "早期对话摘要") {
+		t.Fatalf("压缩摘要未随提交写入 Session：%q", after.Summary)
+	}
+	if len(after.Messages) >= len(seeded)+2 {
+		t.Fatalf("压缩后历史条数 = %d，期望少于未压缩时的 %d", len(after.Messages), len(seeded)+2)
+	}
+	if err := core.ValidateMessages(after.Messages); err != nil {
+		t.Fatalf("压缩后会话历史不合法：%v", err)
+	}
+
+	// 第二轮：摘要必须重新进入视图，而不是重复插入原消息。
+	if _, err := runner.Run(context.Background(), httpapi.RunRequest{SessionID: "s-1", RunID: "run-2", Message: "第二轮追问"}); err != nil {
+		t.Fatalf("第二轮失败：%v", err)
+	}
+	second := provider.requestAt(t, 2)
+	if len(second.Messages) == 0 || !strings.Contains(textOf(second.Messages[0]), "早期对话摘要") {
+		t.Fatalf("第二轮模型请求未召回摘要：%+v", second.Messages)
+	}
+	for _, message := range second.Messages {
+		if textOf(message) == textOf(seeded[0]) {
+			t.Fatalf("已被摘要覆盖的历史在后续请求中重复出现")
+		}
+	}
+}
+
+// TestRunCompactionRollsBackOnProviderFailure 覆盖 AC-004：压缩已发生但 Provider 随后失败时，
+// 会话的消息、摘要与 Todo 都保持运行前状态（不出现半轮提交）。
+func TestRunCompactionRollsBackOnProviderFailure(t *testing.T) {
+	manager := newManager()
+	seedLongHistory(t, manager, "s-1", 40)
+	if err := manager.Save(context.Background(), session.Session{
+		ID:       "s-1",
+		Messages: snapshot(t, manager, "s-1").Messages,
+		Summary:  "基线摘要",
+		Todos:    []session.Todo{{ID: "todo-1", Title: "保持未变", Status: session.TodoStatusPending}},
+	}); err != nil {
+		t.Fatalf("预置会话状态失败：%v", err)
+	}
+	before := snapshot(t, manager, "s-1")
+
+	summarizer := &recordingSummarizer{summary: "规则化摘要"}
+	provider := &scriptedProvider{onCall: func(context.Context, int) (llm.Response, error) {
+		return llm.Response{}, errors.New("上游不可用")
+	}}
+	runner := newTestRunner(t, Deps{
+		Provider:   provider,
+		Sessions:   manager,
+		Tools:      fixedTools(newRegistry(t, &recordingTool{name: "calculator"})),
+		Summarizer: summarizer,
+	}, Config{TokenBudget: 700, KeepRecent: 4})
+
+	outcome, err := runner.Run(context.Background(), httpapi.RunRequest{SessionID: "s-1", RunID: "run-1", Message: "失败这一轮"})
+	if err != nil {
+		t.Fatalf("Run 已形成结论时不应返回 error：%v", err)
+	}
+	if outcome.Status != core.RunStatusFailed || core.KindOf(outcome.Err) != core.KindProviderFailure {
+		t.Fatalf("终态 = (%s,%v)，期望 FAILED/provider_failure", outcome.Status, outcome.Err)
+	}
+	if summarizer.callCount() != 1 {
+		t.Fatalf("Provider 失败前应恰好压缩一次，实际 %d 次", summarizer.callCount())
+	}
+	if after := snapshot(t, manager, "s-1"); !reflect.DeepEqual(before, after) {
+		t.Fatalf("压缩后失败的 Run 破坏了会话状态：\nbefore=%+v\nafter=%+v", before, after)
+	}
+}
+
+// TestRunCompactionKeepsToolPairing 覆盖 AC-003：压缩后发给 Provider 的视图仍满足
+// assistant(ToolCalls) 与 tool(ToolResult) 的配对约束，不产生孤立结果。
+func TestRunCompactionKeepsToolPairing(t *testing.T) {
+	manager := newManager()
+	seedLongHistory(t, manager, "s-1", 40)
+	echo := &recordingTool{name: "echo"}
+	provider := &scriptedProvider{script: []llm.Response{
+		callsResponse("resp-1", toolCall("call-1", "echo", `{}`)),
+		textResponse("resp-2", "完成"),
+	}}
+	runner := newTestRunner(t, Deps{
+		Provider: provider,
+		Sessions: manager,
+		Tools:    fixedTools(newRegistry(t, echo)),
+	}, Config{TokenBudget: 700, KeepRecent: 1})
+
+	outcome, err := runner.Run(context.Background(), httpapi.RunRequest{SessionID: "s-1", RunID: "run-1", Message: "调用工具"})
+	if err != nil {
+		t.Fatalf("Run 返回错误：%v", err)
+	}
+	if outcome.Status != core.RunStatusCompleted || outcome.ToolCalls != 1 {
+		t.Fatalf("终态 = (%s,%d)，期望 COMPLETED 且执行 1 次工具", outcome.Status, outcome.ToolCalls)
+	}
+
+	second := provider.requestAt(t, 2)
+	if err := core.ValidateMessages(second.Messages); err != nil {
+		t.Fatalf("压缩后的工具视图非法：%v", err)
+	}
+	foundCall, foundResult := false, false
+	for _, message := range second.Messages {
+		if message.Role == testRoleTool {
+			if message.ToolResult == nil || message.ToolResult.CallID != "call-1" {
+				t.Fatalf("工具结果缺少配对身份：%+v", message)
+			}
+			foundResult = true
+		}
+		for _, call := range message.ToolCalls {
+			if call.ID == "call-1" {
+				foundCall = true
+			}
+		}
+	}
+	if !foundCall || !foundResult {
+		t.Fatalf("当前工具调用链被截断：call=%v result=%v", foundCall, foundResult)
+	}
+	after := snapshot(t, manager, "s-1")
+	if err := core.ValidateMessages(after.Messages); err != nil {
+		t.Fatalf("提交后的会话历史非法：%v", err)
+	}
+	if len(echo.executed()) != 1 {
+		t.Fatalf("工具执行次数 = %d，期望 1", len(echo.executed()))
+	}
+}
+
+// TestRunUnsatisfiableBudgetFailsWithoutSideEffects 覆盖 AC-005：保留目标装不进预算时返回
+// 明确错误（invalid_argument），不发出模型调用、不修改会话。
+func TestRunUnsatisfiableBudgetFailsWithoutSideEffects(t *testing.T) {
+	manager := newManager()
+	seedLongHistory(t, manager, "s-1", 10)
+	before := snapshot(t, manager, "s-1")
+	provider := &scriptedProvider{script: []llm.Response{textResponse("resp-1", "不应发出")}}
+	runner := newTestRunner(t, Deps{
+		Provider: provider,
+		Sessions: manager,
+		Tools:    fixedTools(newRegistry(t, &recordingTool{name: "calculator"})),
+	}, Config{TokenBudget: 50, KeepRecent: 1000})
+
+	outcome, err := runner.Run(context.Background(), httpapi.RunRequest{SessionID: "s-1", RunID: "run-1", Message: "预算不足"})
+	if err != nil {
+		t.Fatalf("Run 已形成结论时不应返回 error：%v", err)
+	}
+	if outcome.Status != core.RunStatusFailed || core.KindOf(outcome.Err) != core.KindInvalidArgument {
+		t.Fatalf("终态 = (%s,%v)，期望 FAILED/invalid_argument", outcome.Status, outcome.Err)
+	}
+	if provider.callCount() != 0 {
+		t.Fatalf("预算不足时不得发出模型调用，实际 %d 次", provider.callCount())
+	}
+	if after := snapshot(t, manager, "s-1"); !reflect.DeepEqual(before, after) {
+		t.Fatalf("预算不足的 Run 修改了会话状态")
+	}
+}
+
+// recordingSummarizer 是可计数的摘要器替身：只返回固定摘要，不发网络请求。
+type recordingSummarizer struct {
+	summary string
+
+	mu    sync.Mutex
+	calls int
+}
+
+// Summarize 实现 contextmgr.Summarizer。
+func (s *recordingSummarizer) Summarize(context.Context, contextmgr.SummarizeRequest) (string, error) {
+	s.mu.Lock()
+	s.calls++
+	s.mu.Unlock()
+	return s.summary, nil
+}
+
+// callCount 返回摘要调用次数。
+func (s *recordingSummarizer) callCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
 }

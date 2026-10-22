@@ -5,7 +5,8 @@
 //   - 每次 Complete 只发出一次 HTTP 请求，不做自动重试（429 / 5xx 也不重发）；
 //   - 失败统一用 core.RunError 表达：HTTP 非 2xx、协议错误与传输失败为 provider_failure，
 //     ctx 取消为 cancelled，ctx 超时为 deadline_exceeded；
-//   - 端点固定为 <BaseURL>/chat/completions，BaseURL 可自带 /v1 前缀与结尾斜杠。
+//   - 端点固定为 <BaseURL>/chat/completions，BaseURL 可自带 /v1 前缀与结尾斜杠；
+//     已经写成完整端点（.../chat/completions）时不再重复拼接。
 package openai
 
 import (
@@ -40,6 +41,7 @@ const (
 // Config 是 Client 的可配置项。
 type Config struct {
 	// BaseURL 是兼容服务根地址，例如 https://api.example.com/v1；必填。
+	// 也接受 Provider 文档给出的完整端点（.../chat/completions），此时不再追加路径。
 	BaseURL string
 	// APIKey 非空时以 Authorization: Bearer <key> 发送；为空时不发送该头。
 	APIKey string
@@ -87,7 +89,12 @@ func NewClient(cfg Config) (*Client, error) {
 	}
 
 	// 端点固定为 <BaseURL>/chat/completions：只规范化结尾斜杠，保留 BaseURL 自带的前缀（如 /v1）。
-	parsed.Path = strings.TrimRight(parsed.Path, "/") + chatPath
+	// Provider 文档里经常直接给出完整端点，配置成 .../chat/completions 时不能拼成两遍。
+	trimmed := strings.TrimRight(parsed.Path, "/")
+	if !strings.HasSuffix(trimmed, chatPath) {
+		trimmed += chatPath
+	}
+	parsed.Path = trimmed
 	parsed.RawQuery = ""
 	parsed.Fragment = ""
 

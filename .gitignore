@@ -5,6 +5,9 @@
 # 本地构建产物
 /bin/
 /mini-agent
+/web/node_modules/
+/web/dist/
+/web/*.tsbuildinfo
 
 # 编辑器与系统文件
 .DS_Store

@@ -78,8 +78,9 @@ make up      # 容器化启动（依赖 Docker Compose）
 
 ### CI
 
-- `.cnb.yml` 在 `main`、`develop` 及其他分支上触发：任意分支 push 与 PR 只执行 `make ci`；只有 `main` 的 push 在检查通过后才构建并推送镜像。
-- 镜像版本由仓库根 `VERSION` 文件 + 提交短 SHA 生成（`v<VERSION>-<CNB_COMMIT_SHORT>`），镜像路径由 CNB 内置变量 `CNB_DOCKER_REGISTRY` / `CNB_REPO_SLUG_LOWERCASE` 推导，不写死仓库地址。
+- `.cnb.yml` 在 `main`、`develop` 及其他分支上触发：分支 push 与 PR 执行 Go 检查和前端镜像构建（含前端测试、类型检查）；只有 `main` 的 push 在检查通过后才推送前后端镜像。
+- 前端在 `web/`，使用 React / TypeScript / Vite，Node.js 24；`make web-check` 本机检查，`make web-stage` 在 Docker 中只执行前端阶段的同一检查。前端产物由根 `Dockerfile` 打进唯一应用镜像，`make up` 只启动一个容器：同一端口提供页面 `/`、同源 `/api` 与 `/v1`。
+- 只发布一个应用镜像：版本由仓库根 `VERSION` 文件 + 提交短 SHA 生成（`v<VERSION>-<CNB_COMMIT_SHORT>`），与 `latest` 由同一构建产物打标签得到；镜像路径由 CNB 内置变量 `CNB_DOCKER_REGISTRY` / `CNB_REPO_SLUG_LOWERCASE` 推导，不写死仓库地址。
 
 ### 共享资源
 

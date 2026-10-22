@@ -35,6 +35,8 @@ const (
 	CodeNotFound ErrorCode = "not_found"
 	// CodeMethodNotAllowed 表示已知路径的方法不符。
 	CodeMethodNotAllowed ErrorCode = "method_not_allowed"
+	// CodeForbiddenOrigin 表示同源代理入口（/api/*）收到跨站写入请求。
+	CodeForbiddenOrigin ErrorCode = "forbidden_origin"
 	// CodeSessionNotFound 表示会话不存在。
 	CodeSessionNotFound ErrorCode = "session_not_found"
 	// CodeSessionExpired 表示会话已过期。
@@ -70,6 +72,7 @@ var errorMessages = map[ErrorCode]string{
 	CodeUnauthorized:         "未通过认证",
 	CodeNotFound:             "资源不存在",
 	CodeMethodNotAllowed:     "请求方法不被允许",
+	CodeForbiddenOrigin:      "请求来源不被允许",
 	CodeSessionNotFound:      "会话不存在或已被清理",
 	CodeSessionExpired:       "会话已过期",
 	CodeSessionExists:        "同 ID 会话仍有效",
@@ -94,6 +97,7 @@ var errorStatuses = map[ErrorCode]int{
 	CodeUnauthorized:         http.StatusUnauthorized,
 	CodeNotFound:             http.StatusNotFound,
 	CodeMethodNotAllowed:     http.StatusMethodNotAllowed,
+	CodeForbiddenOrigin:      http.StatusForbidden,
 	CodeSessionNotFound:      http.StatusNotFound,
 	CodeSessionExpired:       http.StatusNotFound,
 	CodeSessionExists:        http.StatusConflict,
