@@ -191,10 +191,13 @@ type RunOutcome struct {
 | `MINI_AGENT_MAX_LLM_CALLS` | 否 | `8` | `RunPolicy.MaxLLMCalls` |
 | `MINI_AGENT_MAX_TOOL_CALLS` | 否 | `8` | `RunPolicy.MaxToolCalls` |
 | `MINI_AGENT_TOOL_TIMEOUT` | 否 | `30s` | 工具级超时，`<= 0` 表示不设 |
+| `MINI_AGENT_CONTEXT_TOKEN_BUDGET` | 否 | `0` | 上下文估算预算；`0` 表示禁用压缩，必须为非负整数 |
+| `MINI_AGENT_CONTEXT_KEEP_RECENT` | 否 | `8` | 压缩时保留的近期消息条数下限；必须为非负整数，`0` 视为未配置 |
 
 - 配置结构必须实现脱敏 `String()`：`%v` / `%+v` / `%#v` 都不输出明文凭证，输出 `<redacted>` / `<unset>`。
 - 运行日志只经 `runlog.Sink` 记录，Sink 失败不得改变响应、Run 状态或计数。
-- v1 固定 `TokenBudget = 0`：不实现上下文压缩；`contextmgr.NewManager` 要求的 `Summarizer` 使用 fail-closed 占位实现，正常路径永不被调用，且不得被表述为生产级摘要能力。
+- 上下文压缩默认关闭：`MINI_AGENT_CONTEXT_TOKEN_BUDGET` 未配置或为 `0` 时行为与旧版本一致（不压缩、历史继续累积）。配置正整数后，`service.Runner` 把预算与 `KeepRecent` 透传 Agent Loop；默认 `Summarizer` 是 `contextmgr.DigestSummarizer`（确定性规则化摘录，零模型调用），不需要额外服务或真实模型。
+- 预算不可满足时 `Build` 返回 `invalid_argument`，按既有错误分类映射为 `internal`（不新增协议码）；HTTP 响应仍只有固定 `code`/`message`，精确原因通过 Run 结论与运行日志观察。
 
 ## 9. 服务层不变量
 
@@ -219,7 +222,7 @@ type RunOutcome struct {
 
 - 已有真实 Provider 普通对话和计算器调用记录，见[验证说明](../verification.md)。少量成功请求不证明默认 60 秒超时适合所有模型、长对话与负载。
 - 客户端断开时响应不可达的观察口径：只能依赖终态、日志与 `Fake Provider` 的取消观察，无法验证客户端实际收到状态码。
-- Todo 端口适配（`session.TodoOperations` → `builtin.TodoOperations`）、Todo ID 生成与状态迁移、生产 LLM `Summarizer` 与真实 tokenizer 校准：尚未接入默认启动入口；因此 v1 服务不注册 Todo 工具，长会话触达 Provider 限制时以 `provider_failure`（502）结束。
+- Todo 已接入默认启动入口：`service/todo.go` 完成 `*session.Turn` → `builtin.TodoOperations` 适配（含 ID 生成与状态迁移），`todo_create` / `todo_list` / `todo_complete` 的写入与消息同事务提交或整轮回滚。生产 LLM `Summarizer` 与真实 tokenizer 校准仍未接入，长会话触达 Provider 限制时以 `provider_failure`（502）结束。
 - 流式输出、异步轮询、TLS、CORS、限流/配额、metrics、持久化、用户体系与 RBAC：未设计，属后续任务。
 
 ## 11. 演进规则

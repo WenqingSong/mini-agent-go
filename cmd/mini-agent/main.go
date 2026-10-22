@@ -1,8 +1,11 @@
 // Command mini-agent 是 Agent Runtime 的可启动 HTTP 入口。
 //
-// 它只负责装配：环境变量 → 配置（fail-closed 校验）→ Provider / 工具注册表 /
+// 它只负责装配：环境变量 → 配置（fail-closed 校验）→ Provider / 工具注册表构造器 /
 // 内存 Session Manager / 上下文管理器 / 日志 Sink → 监听 → 终止信号 → 优雅关闭。
 // 业务逻辑与协议定义分别在 service 与 httpapi 中，本命令不承载任何业务规则。
+//
+// 工具清单本身由 service.NewToolset 决定（calculator / mock_search / todo_*），
+// 这里只把构造器交给装配层，避免入口与运行时各自维护一份工具列表。
 //
 // 配置只从环境变量读取（不进入命令行参数）；凭证不硬编码、不打印、不写入错误信息。
 package main
@@ -19,13 +22,11 @@ import (
 	"syscall"
 	"time"
 
-	"cnb.cool/framework-station/mini-agent-go/builtin"
 	"cnb.cool/framework-station/mini-agent-go/httpapi"
 	"cnb.cool/framework-station/mini-agent-go/llm/openai"
 	"cnb.cool/framework-station/mini-agent-go/runlog"
 	"cnb.cool/framework-station/mini-agent-go/service"
 	"cnb.cool/framework-station/mini-agent-go/session"
-	"cnb.cool/framework-station/mini-agent-go/tool"
 )
 
 // 环境变量名：与 docs/design/http-api.md §8 的配置契约一致。
@@ -42,6 +43,10 @@ const (
 	envMaxLLMCalls     = "MINI_AGENT_MAX_LLM_CALLS"
 	envMaxToolCalls    = "MINI_AGENT_MAX_TOOL_CALLS"
 	envToolTimeout     = "MINI_AGENT_TOOL_TIMEOUT"
+	// 上下文压缩：预算 0 或未配置表示禁用（负值视为配置错误）；
+	// KeepRecent 0 或未配置时使用 service.DefaultKeepRecent。
+	envContextTokenBudget = "MINI_AGENT_CONTEXT_TOKEN_BUDGET"
+	envContextKeepRecent  = "MINI_AGENT_CONTEXT_KEEP_RECENT"
 )
 
 // toolTimeoutDisabled 表示不设工具级超时：agent.Config.ToolTimeout <= 0 即不设超时。
@@ -92,15 +97,12 @@ func run(ctx context.Context, opts options) error {
 	if err != nil {
 		return fmt.Errorf("mini-agent: 构造 LLM Provider 失败: %w", err)
 	}
-	registry, err := newRegistry()
-	if err != nil {
-		return err
-	}
 	sessions := session.NewManager(session.ManagerConfig{})
 	runner, err := service.NewRunner(service.Deps{
 		Provider: provider,
 		Sessions: sessions,
-		Registry: registry,
+		// 工具注册表按 Run 构造：Todo 工具必须绑定本次 Run 的 Session Turn。
+		Tools: service.NewToolset,
 		// 运行事件只经 runlog.Sink 记录；Sink 失败不影响响应与 Run 结论。
 		Sink: runlog.NewJSONSink(logWriter),
 	}, serviceConfig)
@@ -167,20 +169,6 @@ func run(ctx context.Context, opts options) error {
 	return shutdownErr
 }
 
-// newRegistry 构造 v1 的工具注册表：只注册 calculator 并封闭注册表。
-//
-// Todo 工具需要逐 Turn 的 TodoOperations，其端口适配属于服务装配任务 T08，不在 v1。
-func newRegistry() (tool.Registry, error) {
-	registry := tool.NewMapRegistry()
-	if err := registry.Register(builtin.NewCalculator()); err != nil {
-		return nil, fmt.Errorf("mini-agent: 注册 calculator 失败: %w", err)
-	}
-	if err := registry.Seal(); err != nil {
-		return nil, fmt.Errorf("mini-agent: 封闭工具注册表失败: %w", err)
-	}
-	return registry, nil
-}
-
 // waitReady 等待监听就绪并返回实际地址；服务提前退出、ctx 结束或超时都返回错误。
 func waitReady(ctx context.Context, server *httpapi.Server, served <-chan error) (string, error) {
 	timeout := time.NewTimer(readyTimeout)
@@ -233,15 +221,22 @@ func loadConfig(getenv func(string) string) (httpapi.Config, service.Config, ope
 		MaxToolCalls: service.DefaultMaxToolCalls,
 		SystemPrompt: getenv(envSystemPrompt),
 		Model:        strings.TrimSpace(getenv(envModel)),
-		// v1 明确禁用上下文压缩：TokenBudget 固定 0。
+		// 上下文压缩默认关闭：未配置预算时行为与旧版本一致（不压缩、无限积累历史）。
 		TokenBudget: 0,
-		KeepRecent:  0,
+		KeepRecent:  service.DefaultKeepRecent,
 		ToolTimeout: service.DefaultToolTimeout,
 	}
 	if serviceConfig.MaxLLMCalls, err = positiveIntEnv(getenv, envMaxLLMCalls, serviceConfig.MaxLLMCalls); err != nil {
 		return httpapi.Config{}, service.Config{}, openai.Config{}, err
 	}
 	if serviceConfig.MaxToolCalls, err = positiveIntEnv(getenv, envMaxToolCalls, serviceConfig.MaxToolCalls); err != nil {
+		return httpapi.Config{}, service.Config{}, openai.Config{}, err
+	}
+	// 0 表示禁用压缩；负数属于配置错误（显式拒绝，不做静默降级）。
+	if serviceConfig.TokenBudget, err = nonNegativeIntEnv(getenv, envContextTokenBudget, serviceConfig.TokenBudget); err != nil {
+		return httpapi.Config{}, service.Config{}, openai.Config{}, err
+	}
+	if serviceConfig.KeepRecent, err = nonNegativeIntEnv(getenv, envContextKeepRecent, serviceConfig.KeepRecent); err != nil {
 		return httpapi.Config{}, service.Config{}, openai.Config{}, err
 	}
 	toolTimeout, err := durationEnv(getenv, envToolTimeout, serviceConfig.ToolTimeout)
@@ -333,6 +328,19 @@ func positiveIntEnv(getenv func(string) string, name string, fallback int) (int,
 	}
 	if strings.TrimSpace(getenv(name)) != "" && value <= 0 {
 		return 0, fmt.Errorf("mini-agent: 环境变量 %s 必须为正整数", name)
+	}
+	return value, nil
+}
+
+// nonNegativeIntEnv 读取必须非负的整型环境变量；显式配置负值视为配置非法，
+// 未配置时返回 fallback。用于「0 有明确语义（禁用）」的开关型预算。
+func nonNegativeIntEnv(getenv func(string) string, name string, fallback int) (int, error) {
+	value, err := intEnv(getenv, name, fallback)
+	if err != nil {
+		return 0, err
+	}
+	if value < 0 {
+		return 0, fmt.Errorf("mini-agent: 环境变量 %s 必须为非负整数", name)
 	}
 	return value, nil
 }
