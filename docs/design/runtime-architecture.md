@@ -375,6 +375,7 @@ INV-017 来源：`session-turn-drop-leading-v1` 的 APPROVED `contract.md`（该
 | `e2e/offline_test.go` | 集成验收（仅测试） | AC-005 零真实 Token / 零外网的机械证据（源码扫描 + loopback 与请求计数断言） |
 | `e2e/todo_test.go` | 集成验收（仅测试） | Todo 端到端：创建/查询/完成、跨会话隔离与越权拒绝、失败/预算/超时回滚、非法调用与并发写入 |
 | `e2e/context_test.go` | 集成验收（仅测试） | 正式 HTTP 服务的上下文压缩：可达性、历史缩减与摘要召回、工具配对、失败回滚、预算不足、并发隔离 |
+| `e2e/tools_context_test.go` | 集成验收（仅测试） | 工具与压缩的联合验收：同一 Run 内 Todo 写入与压缩一起提交、压缩与工具写入后 Provider 失败时 Messages / Summary / Todos 全回滚、跨会话 Todo 与 Summary 隔离 |
 
 规则：
 
